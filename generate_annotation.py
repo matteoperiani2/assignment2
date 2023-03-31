@@ -8,7 +8,7 @@ from enum import Enum, auto
 from collections import Counter
 from typing import List
 
-from utils import is_number
+from utils import is_number, create_dirs_for_file
 
 class AnswerType(Enum):
     UNKNOWN = auto()
@@ -20,6 +20,11 @@ class AnswerType(Enum):
 
     def __str__(self):
         return self.name.lower()
+    
+    @classmethod
+    def list(cls, return_unknown=True):
+        return [str(c) for c in cls if return_unknown or c != AnswerType.UNKNOWN]
+        return list(map(lambda c: str(c), cls))
     
 def annotate_with_answer_type(coqa_data: dict, use_additional_answers = True):
     for item in coqa_data["data"]:
@@ -101,6 +106,68 @@ def find_answer_span(passage, answer):
         return None
     return start_idx, end_idx
 
+def annotate_dataset(data_file:str, output_file:str, ignore_additional_answers=False):
+    with open(data_file, "r", encoding="utf-8") as f:
+        coqa_data = json.load(f)
+    
+    annotate_with_answer_type(coqa_data, use_additional_answers = not ignore_additional_answers)
+
+    create_dirs_for_file(output_file)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(coqa_data, f)
+    
+    del coqa_data
+
+def create_readable_dataset(data_file:str, output_file: str, ignore_additional_answers=False):    
+    with open(data_file, "r", encoding="utf-8") as f:
+        annotated_data = json.load(f)
+
+    story_separator = '====================================================\n'
+    create_dirs_for_file(output_file)
+    with open(output_file, "w", encoding="utf-8") as f:
+        for item in annotated_data["data"]:
+            source = item["source"]
+            id = item["id"]
+            story = item["story"]
+            questions = item["questions"]
+            answers = item["answers"]
+            additional_answers = item.get("additional_answers", {})
+            if ignore_additional_answers:
+                additional_answers = {}
+
+            readable_story = to_readable_story(story, questions, answers, additional_answers, source=source, id=id)
+            f.write(readable_story + '\n' + story_separator)
+    
+    del annotated_data
+
+def to_readable_story(story, questions, answers, additional_answers={}, source=None, id=None, split=None) -> str:
+    lines = []
+
+    head = _create_readable_head(source, id, split)
+    if head != '':
+        lines.append(head + "\n")
+
+    lines.append(f'{story}\n')
+    for question_item, *question_answers in zip(questions, answers, *additional_answers.values()):
+        lines.append(f'turn: {question_item["turn_id"]}')
+        lines.append(f'Q\t\t{question_item["input_text"]} || {question_item["answer_type"]}')
+        for answer_item in question_answers:
+            lines.append(f'A\t\t{answer_item["input_text"]} || {answer_item["span_text"]} || {answer_item["answer_type"]}')
+        lines.append('')
+
+    return '\n'.join(lines)
+
+def _create_readable_head(source=None, id=None, split=None):
+    head = []
+    if source:
+        head.append(f'source: {source}')
+    if id:
+        head.append(f'id: {id}')
+    if split:
+        head.append(f'split: {split}')
+
+    return ', '.join(head)
+
 
 def parse_args():
     parser = argparse.ArgumentParser('Annotate the provided CoQA dataset with answer types')
@@ -114,33 +181,10 @@ def parse_args():
         sys.exit(1)
     return parser.parse_args()
 
-def main():    
-    with open(OPTS.data_file, "r", encoding="utf-8") as f:
-        coqa_data = json.load(f)
-
-    annotate_with_answer_type(coqa_data, use_additional_answers = not OPTS.ignore_additional_answers)
-    with open(OPTS.output_file, "w", encoding="utf-8") as f:
-        json.dump(coqa_data, f)
-
+def main():
+    coqa_data = annotate_dataset(OPTS.data_file, OPTS.output_file, OPTS.ignore_additional_answers)
     if OPTS.readable_file:
-        with open(OPTS.readable_file, "w", encoding="utf-8") as f:
-            for item in coqa_data["data"]:
-                lines = []
-                lines.append(f'source: {item["source"]}, id: {item["id"]}\n')
-                lines.append(f'{item["story"]}\n')
-                questions = item["questions"]
-                answers = item["answers"]
-                additional_answers = item.get("additional_answers", {})
-                if OPTS.ignore_additional_answers:
-                    additional_answers = {}
-                for question_item, *question_answers in zip(questions, answers, *additional_answers.values()):
-                    lines.append(f'turn: {question_item["turn_id"]}')
-                    lines.append(f'Q\t\t{question_item["input_text"]} || {question_item["answer_type"]}')
-                    for answer_item in question_answers:
-                        lines.append(f'A\t\t{answer_item["input_text"]} || {answer_item["span_text"]} || {answer_item["answer_type"]}')
-                    lines.append('')
-                lines.append('====================================================\n')
-                f.write('\n'.join(lines))
+        create_readable_dataset(OPTS.output_file, OPTS.readable_file, OPTS.ignore_additional_answers)
 
 if __name__ == '__main__':
     OPTS = parse_args()
