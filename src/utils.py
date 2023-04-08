@@ -1,4 +1,6 @@
+import itertools
 import os
+import random
 import re
 import string
 import datasets
@@ -9,6 +11,34 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from text_to_num import text2num
+import torch
+from torch.utils.data import DataLoader
+
+################# Reproducibility ######################à
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+
+
+# Using a generator and the following function as `worker_init_fn` preserves reproducibility when using DataLoader
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def create_reproducible_dataloader(*args, **kwargs):
+    generator = torch.Generator()
+    return DataLoader(*args,
+                      **kwargs,
+                      worker_init_fn=seed_worker,
+                      generator=generator)
+###############################################################
 
 
 def create_dirs_for_file(file_path):
@@ -40,83 +70,29 @@ def is_number(string: str) -> bool:
     except ValueError:
         return False
 
+def batched_function(fn, scalar_output=True):
 
-######################### Preprocessing #############################################
-def remove_articles_(text):
-    regex = re.compile(r'\b(a|an|the)\b', re.UNICODE)
-    return re.sub(regex, ' ', text)
+    def execute_on_batch(batch):
+        examples = [
+            fn(dict(zip(batch.keys(), values)))
+            for values in zip(*batch.values())
+        ]
 
+        if scalar_output:
+            return {
+                key: [example[key] for example in examples]
+                for key in examples[0].keys()
+            }
+        else:
+            return {
+                key:
+                list(itertools.chain(*(example[key] for example in examples)))
+                for key in examples[0].keys()
+            }
+        return batch
 
-def white_space_fix(text):
-    return ' '.join(text.split())
+    return execute_on_batch
 
-
-def remove_punc(text):
-    exclude = set(string.punctuation)
-    return ''.join(ch for ch in text if ch not in exclude)
-
-
-def lower(text):
-    return text.lower()
-
-
-def normalize_text(text, remove_articles=False):
-    """Lower text and remove punctuation, articles and extra whitespace."""
-    text = remove_punc(lower(text))
-    if remove_articles:
-        text = remove_articles_(text)
-    return white_space_fix(text)
-
-
-def normalize_answer(text):
-    """Lower text and remove punctuation, articles and extra whitespace."""
-    return normalize_text(text, remove_articles=True)
-
-def strip_non_alphanumeric_chars(text: str):
-    """
-    Removes trailing and leading non alpha-numeric characters from a given string.
-    """
-    start_index = 0
-    while (start_index < len(text) and not text[start_index].isalnum()):
-        start_index += 1
-
-    end_index = len(text) - 1
-    while (end_index > start_index and not text[end_index].isalnum()):
-        end_index -= 1
-
-    return text[start_index:end_index + 1]
-
-def find_span(passage: str,
-              text: str,
-              span_start: int = None,
-              span_end: int = None):
-
-    if len(text) == 0: return (0, 0)
-    assert text[0].isalnum() and text[-1].isalnum(), \
-        "Text must begin and end with an alphanumeric character."
-
-    start_idx = passage.find(text, span_start, span_end)
-    end_idx = start_idx + len(text) - 1
-
-    if start_idx == -1:
-        raise ValueError("The text is not present in the passage.")
-
-    # Find the beginning of the word in the passage
-    while (start_idx > 0 and passage[start_idx - 1].isalnum()):
-        start_idx -= 1
-
-    # Find the end of the word in the passage
-    while (end_idx < len(passage) - 1 and passage[end_idx + 1].isalnum()):
-        end_idx += 1
-
-    return start_idx, end_idx + 1
-
-def fix_rationale(passage: str, rationale: str, span_start: int, span_end: int):
-    rationale = strip_non_alphanumeric_chars(rationale)
-    span_start, span_end = find_span(passage, rationale, span_start=span_start, span_end=span_end)
-    return passage[span_start: span_end], span_start, span_end
-
-####################################################################################################
 
 def create_dataframe(dataset: datasets.DatasetDict):
     dataset.set_format("pandas")
@@ -170,6 +146,7 @@ def explode_qa(dataset: pd.DataFrame):
     cols.append(cols.pop(cols.index("split")))
     return dataset[cols]
 
+
 def plot_answer_type_distribution(qa_dataset: pd.DataFrame):
     answer_type_distribution = qa_dataset.groupby(
         "split")["answer_type"].value_counts(normalize=True)
@@ -184,6 +161,6 @@ def plot_answer_type_distribution(qa_dataset: pd.DataFrame):
 
     for i in ax.containers:
         ax.bar_label(i, )
-    
+
     plt.tight_layout()
     plt.show()

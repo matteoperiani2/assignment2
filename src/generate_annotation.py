@@ -8,7 +8,7 @@ from enum import Enum, auto
 from collections import Counter
 from typing import List
 
-from utils import is_number, create_dirs_for_file
+from .utils import is_number, create_dirs_for_file
 
 class AnswerType(Enum):
     UNKNOWN = auto()
