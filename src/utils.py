@@ -1,8 +1,7 @@
 import itertools
 import os
 import random
-import re
-import string
+from typing import Dict
 import datasets
 
 import pandas as pd
@@ -13,6 +12,9 @@ import matplotlib.pyplot as plt
 from text_to_num import text2num
 import torch
 from torch.utils.data import DataLoader
+import transformers
+from .preprocessing import CoQADatasetPreprocessing
+
 
 ################# Reproducibility ######################à
 def set_seed(seed):
@@ -38,6 +40,8 @@ def create_reproducible_dataloader(*args, **kwargs):
                       **kwargs,
                       worker_init_fn=seed_worker,
                       generator=generator)
+
+
 ###############################################################
 
 
@@ -70,6 +74,7 @@ def is_number(string: str) -> bool:
     except ValueError:
         return False
 
+
 def batched_function(fn, scalar_output=True):
 
     def execute_on_batch(batch):
@@ -83,15 +88,50 @@ def batched_function(fn, scalar_output=True):
                 key: [example[key] for example in examples]
                 for key in examples[0].keys()
             }
-        else:
-            return {
-                key:
-                list(itertools.chain(*(example[key] for example in examples)))
-                for key in examples[0].keys()
-            }
-        return batch
+
+        return {
+            key: list(itertools.chain(*(example[key] for example in examples)))
+            for key in examples[0].keys()
+        }
 
     return execute_on_batch
+
+
+def prepare_inputs_for_models(raw_dataset,
+                               checkpoints: Dict[str, str],
+                               filename_fn,
+                               add_history=False,
+                               verbose=True,
+                               **preprocessing_kwargs):
+    for name, checkpoint in checkpoints.items():
+        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
+        preprocessing = CoQADatasetPreprocessing(tokenizer,
+                                                 use_window=True,
+                                                 **preprocessing_kwargs)
+
+        if verbose:
+            print("Preparing inputs for", name, "...")
+
+        dataset = raw_dataset.map(
+            preprocessing.process_data_to_model_inputs,
+            fn_kwargs={"add_history": add_history},
+            batched=True,
+            remove_columns=raw_dataset["train"].column_names,
+            num_proc=12)
+
+        dataset.save_to_disk(filename_fn(name))
+
+        if verbose:
+            print(dataset)
+            print()
+            print("Inputs:")
+            decoded_inputs = tokenizer.batch_decode(
+                dataset["train"][:5]["input_ids"])
+            for decoded in decoded_inputs:
+                print(decoded)
+            print()
+
+        del dataset
 
 
 def create_dataframe(dataset: datasets.DatasetDict):
@@ -164,3 +204,41 @@ def plot_answer_type_distribution(qa_dataset: pd.DataFrame):
 
     plt.tight_layout()
     plt.show()
+
+
+def show_inputs(tokenizer, data, inputs):
+    for k, v in inputs.items():
+        print(f'{k:<27}: {v}')
+    print()
+
+    for idx in range(len(inputs["input_ids"])):
+        show_input(tokenizer, data, inputs, idx)
+        print()
+
+
+def show_input(tokenizer, data, inputs, idx):
+    sample_idx = inputs["overflow_to_sample_mapping"][
+        idx] if "overflow_to_sample_mapping" in inputs else idx
+
+    input_ids = np.asarray(inputs["input_ids"][idx])
+    passage_mask = np.asarray(inputs["passage_mask"][idx])
+    rationale_mask = np.asarray(inputs["rationale_mask"][idx])
+    rationale_start = inputs["rationale_start"][idx]
+    rationale_end = inputs["rationale_end"][idx]
+    labels = np.asarray(inputs["labels"][idx])
+    decoder_attention_mask = np.asarray(inputs["decoder_attention_mask"][idx])
+
+    passage = input_ids[passage_mask.astype(np.bool_)]
+    rationale = input_ids[rationale_mask.astype(np.bool_)]
+    assert np.all(rationale == input_ids[rationale_start:rationale_end])
+    answer = labels[decoder_attention_mask.astype(np.bool_)]
+
+    print("Input:", tokenizer.decode(input_ids))
+    print("Q:", data["question"][sample_idx])
+    print("P (-):", data["passage"][sample_idx])
+    print("P (+):", tokenizer.decode(passage))
+    print("R (-):", data["rationale"][sample_idx])
+    print("R (+):", tokenizer.decode(rationale))
+    print("A (-):", data["answer"][sample_idx])
+    print("A (+):", tokenizer.decode(answer))
+    print("History:", data["history"][sample_idx])

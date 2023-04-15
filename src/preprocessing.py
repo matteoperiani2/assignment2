@@ -1,16 +1,20 @@
+import itertools
 import re
 import string
+import warnings
 import transformers
 
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 class CoQADatasetPreprocessing:
 
-    def __init__(self, tokenizer: transformers.PreTrainedTokenizer = None, max_length=512, stride=128, use_window=False) -> None:
+    def __init__(self, tokenizer: transformers.PreTrainedTokenizer = None, encoder_max_length=512, decoder_max_length=350, stride=196, use_window=False, max_history_length=4) -> None:
         self.tokenizer = tokenizer
-        self.max_length = max_length
+        self.encoder_max_length = encoder_max_length
+        self.decoder_max_length = decoder_max_length
         self.stride = stride
         self.use_window = use_window
+        self.max_history_length = max_history_length
 
     def explode_questions(self, example):
         questions = example["questions"]
@@ -22,6 +26,7 @@ class CoQADatasetPreprocessing:
             histories.append(history)
 
         return {
+            "id": [example["id"]] * example["qa_length"],
             "passage": [example["story"]] * example["qa_length"],
             "turn": [question_item["turn_id"] for question_item in questions],
             "question":
@@ -101,18 +106,31 @@ class CoQADatasetPreprocessing:
 
         return example
     
-    def prepare_inputs(self, examples):
+    def process_data_to_model_inputs(self, examples, add_history = False):
         assert self.tokenizer is not None, "A tokenizer is required to prepare the inputs for the model"
+
+        sentences = [examples["question"], examples["passage"]]
+
+        if add_history:
+            sentences[0] = self.__concat_history_and_question(examples["history"], examples["question"])
+
         inputs = self.tokenizer(
-            examples["question"],
-            examples["passage"],
+            *sentences,
             padding="max_length",
             truncation="only_second",
-            max_length=self.max_length,
+            max_length=self.encoder_max_length,
             stride=self.stride,
             return_overflowing_tokens=self.use_window,
             return_offsets_mapping=True,
         )
+        outputs = self.tokenizer(
+            examples["answer"],
+            padding="max_length",
+            truncation=True,
+            max_length=self.decoder_max_length)
+        
+        outputs["input_ids"] = [[-100 if token == self.tokenizer.pad_token_id else token for token in labels]
+                                 for labels in outputs.input_ids.copy()]
 
         offset_mapping = inputs["offset_mapping"]
         if self.use_window:
@@ -124,7 +142,12 @@ class CoQADatasetPreprocessing:
         rationale_starts = []
         rationale_ends = []
         rationale_masks = []
+        labels = []
+        decoder_attention_masks = []
 
+        ids = []
+        
+        rationale_in_passage = [False] * len(examples["question"])
         for i, offset in enumerate(offset_mapping):
             sample_idx = sample_map(i)
             start_char = examples["span_start"][sample_idx]
@@ -138,13 +161,46 @@ class CoQADatasetPreprocessing:
             
             passage_masks.append(self.__create_mask(sequence_ids, passage_start, passage_end+1))
             rationale_masks.append(self.__create_mask(sequence_ids, rationale_start, rationale_end))
+            labels.append(outputs.input_ids[sample_idx])
+            decoder_attention_masks.append(outputs.attention_mask[sample_idx])
+
+            id = examples["id"][sample_idx]
+            turn = examples["turn"][sample_idx]
+            new_id = f"{id}_{turn}"
+            ids.append(new_id)
+            rationale_in_passage[sample_idx] |= rationale_start != -1
+        
+        for sample_idx, is_rationale_in_passage in enumerate(rationale_in_passage):
+            if not is_rationale_in_passage:
+                warnings.warn(f"The rationale is never contained in the passage. Id: {examples['id'][sample_idx]}, turn: {examples['turn'][sample_idx]}")
 
         inputs["passage_mask"] = passage_masks
         inputs["rationale_start"] = rationale_starts
         inputs["rationale_end"] = rationale_ends
         inputs["rationale_mask"] = rationale_masks
+        inputs["labels"] = labels
+        inputs["decoder_attention_mask"] = decoder_attention_masks
+        inputs["id"] = ids
 
         return inputs
+    
+    def __concat_history_and_question(self, histories, questions):
+        outputs = []
+        for history, question in zip(histories, questions):
+            history_str = self.__create_history_str(history)
+            history_question = self.tokenizer.sep_token.join((history_str, question))
+            outputs.append(history_question)
+        return outputs
+    
+    def __create_history_str(self, history):
+        history_items = reversed(tuple(itertools.islice((reversed(history)), self.max_history_length)))
+        qa_pairs = []
+        for item in history_items:
+            qa = (item["question"], item["answer"])
+            qa = self.tokenizer.sep_token.join(qa)
+            qa_pairs.append(qa)
+        return self.tokenizer.sep_token.join(qa_pairs)
+
 
     def __find_passage(self, sequence_ids: List[int]) -> Tuple[int, int]:
         """
@@ -276,37 +332,38 @@ def fix_rationale(passage: str, rationale: str, span_start: int,
                                      span_end=span_end)
     return passage[span_start:span_end], span_start, span_end
 
-if __name__ == "__main__":
-    from transformers import AutoTokenizer
-    import datasets
-    from src.config import *
-    from src.utils import *
-    CONFIG = Config()
 
-    tokenizer = AutoTokenizer.from_pretrained(CONFIG.checkpoints.distil_roberta)
-    preprocessing = CoQADatasetPreprocessing(tokenizer, use_window=True)
+# if __name__ == "__main__":
+#     from transformers import AutoTokenizer
+#     import datasets
+#     from config import *
+#     from utils import *
+#     CONFIG = Config()
 
-    raw_dataset = datasets.DatasetDict.load_from_disk(CONFIG.dataset.filtered_dir)
-    train_dataset = raw_dataset["train"].select(range(10))
+#     tokenizer = AutoTokenizer.from_pretrained(CONFIG.checkpoints.distil_roberta)
+#     preprocessing = CoQADatasetPreprocessing(tokenizer, use_window=True)
 
-    train_dataset = train_dataset.map(
-        batched_function(preprocessing.explode_questions, scalar_output=False),
-        batched=True,
-        remove_columns=raw_dataset["train"].column_names)
-    train_dataset = train_dataset.map(batched_function(preprocessing.preprocess_texts), batched=True)
+#     raw_dataset = datasets.DatasetDict.load_from_disk(CONFIG.dataset.filtered_dir)
+#     train_dataset = raw_dataset["train"].select(range(10))
+
+#     train_dataset = train_dataset.map(
+#         batched_function(preprocessing.explode_questions, scalar_output=False),
+#         batched=True,
+#         remove_columns=raw_dataset["train"].column_names)
+#     train_dataset = train_dataset.map(batched_function(preprocessing.preprocess_texts), batched=True)
 
     
-    data = train_dataset.select(range(2))
-    inputs = preprocessing.prepare_inputs(data)
+#     data = train_dataset.select(range(2))
+#     inputs = preprocessing.prepare_inputs(data)
 
-    idx = 0
-    sample_idx = inputs["overflow_to_sample_mapping"][idx]
+#     idx = 0
+#     sample_idx = inputs["overflow_to_sample_mapping"][idx]
 
-    input_ids = np.asarray(inputs["input_ids"][idx])
-    passage_mask = np.asarray(inputs["passage_mask"][idx])
-    rationale_mask = np.asarray(inputs["rationale_mask"][idx])
-    rationale_start = inputs["rationale_start"][idx]
-    rationale_end = inputs["rationale_end"][idx]
+#     input_ids = np.asarray(inputs["input_ids"][idx])
+#     passage_mask = np.asarray(inputs["passage_mask"][idx])
+#     rationale_mask = np.asarray(inputs["rationale_mask"][idx])
+#     rationale_start = inputs["rationale_start"][idx]
+#     rationale_end = inputs["rationale_end"][idx]
 
-    passage = input_ids[passage_mask.astype(np.bool_)]
-    rationale = input_ids[rationale_mask.astype(np.bool_)]
+#     passage = input_ids[passage_mask.astype(np.bool_)]
+#     rationale = input_ids[rationale_mask.astype(np.bool_)]

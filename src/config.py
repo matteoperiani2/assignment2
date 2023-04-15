@@ -25,8 +25,12 @@ class Config():
         splitted_dir: str = os.path.join(data_dir, "splitted")
         processed_dir: str = os.path.join(data_dir, "processed")
         final_dir: str = os.path.join(data_dir, "final")
-        final_no_history: str = os.path.join(final_dir, "final_no_history")
-        final_with_history: str = os.path.join(final_dir, "final_with_history")
+        
+        def final_no_history(self, checkpoint_name: str)-> str:
+            return os.path.join(self.final_dir, "final_no_history", checkpoint_name)
+        
+        def final_with_history(self, checkpoint_name: str)-> str:
+            return os.path.join(self.final_dir, "final_with_history", checkpoint_name)
 
     class Checkpoints():
         def __init__(self,
