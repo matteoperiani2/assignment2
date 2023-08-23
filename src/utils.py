@@ -1,18 +1,22 @@
+import inspect
 import itertools
 import os
 import random
-from typing import Dict
-import datasets
+from typing import Dict, Literal
 
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from text_to_num import text2num
-import torch
-from torch.utils.data import DataLoader
 import transformers
+import datasets
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+from text_to_num import text2num
+
 from .preprocessing import CoQADatasetPreprocessing
 
 
@@ -120,46 +124,6 @@ def batched_function(fn, scalar_output=True):
     return execute_on_batch
 
 
-def prepare_inputs_for_train(
-    dataset: datasets.DatasetDict,
-    checkpoints: Dict[str, str],
-    filename_fn,
-    add_history=False,
-    num_processes=None,
-    verbose=True,
-    **preprocessing_kwargs,
-):
-    for name, checkpoint in checkpoints.items():
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
-        preprocessing = CoQADatasetPreprocessing(tokenizer, **preprocessing_kwargs)
-
-        if verbose:
-            print("Preparing inputs for", name, "...")
-
-        if not os.path.exists(filename_fn(name)):
-            dataset_ = dataset.map(
-                preprocessing.process_data_to_model_inputs,
-                fn_kwargs={"add_history": add_history},
-                batched=True,
-                remove_columns=dataset["train"].column_names,
-                num_proc=num_processes,
-            )
-
-            dataset_.save_to_disk(filename_fn(name))
-            del dataset_
-
-        if verbose:
-            dataset_ = datasets.load_from_disk(filename_fn(name))
-            print(dataset_)
-            print()
-            print("Showing some input examples:")
-            decoded_inputs = tokenizer.batch_decode(dataset_["train"][:5]["input_ids"])
-            for decoded in decoded_inputs:
-                print(decoded)
-            print()
-            del dataset_
-
-
 def create_dataframe(dataset: datasets.DatasetDict):
     dataset.set_format("pandas")
 
@@ -247,14 +211,14 @@ def show_input(tokenizer, data, inputs, idx):
 
     input_ids = np.asarray(inputs["input_ids"][idx])
     passage_mask = np.asarray(inputs["passage_mask"][idx])
-    rationale_mask = np.asarray(inputs["rationale_mask"][idx])
+    rationale_labels = np.asarray(inputs["rationale_labels"][idx])
     rationale_start = inputs["rationale_start"][idx]
     rationale_end = inputs["rationale_end"][idx]
     labels = np.asarray(inputs["labels"][idx])
     decoder_attention_mask = np.asarray(inputs["decoder_attention_mask"][idx])
 
     passage = input_ids[passage_mask.astype(np.bool_)]
-    rationale = input_ids[rationale_mask.astype(np.bool_)]
+    rationale = input_ids[rationale_labels > 0]
     assert np.all(rationale == input_ids[rationale_start:rationale_end])
     answer = labels[decoder_attention_mask.astype(np.bool_)]
 
@@ -267,3 +231,23 @@ def show_input(tokenizer, data, inputs, idx):
     print("A (-):", data["answer"][sample_idx])
     print("A (+):", tokenizer.decode(answer))
     print("History:", data["history"][sample_idx])
+
+
+def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.LongTensor:
+    if task == "binary":
+        return (logits > 0.0).long()
+    elif task == "multiclass":
+        return torch.argmax(logits, dim=-1).long()
+    else:
+        raise ValueError(
+            "Invalid task. Supported values are 'binary' and 'multiclass'."
+        )
+    
+def prepare_model_inputs(model: nn.Module, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    forward_signature = set(inspect.signature(model.forward).parameters)
+    inputs = {
+        argument: value.to(model.device)
+        for argument, value in inputs.items()
+        if argument in forward_signature
+    }
+    return inputs

@@ -8,6 +8,22 @@ import numpy as np
 from typing import List, Tuple
 
 
+def answer_to_idx(answer: str) -> int:
+    if answer == "yes":
+        return 0
+    if answer == "no":
+        return 1
+    return 2
+
+
+def idx_to_answer(idx: int) -> str:
+    if idx == 0:
+        return "yes"
+    if idx == 1:
+        return "no"
+    return None
+
+
 class CoQADatasetPreprocessing:
     def __init__(
         self,
@@ -185,6 +201,9 @@ class CoQADatasetPreprocessing:
         else:
             sample_map = lambda i: i
 
+        yes_no_types = []
+        yng_labels = []
+
         passage_masks = []
         rationale_starts = []
         rationale_ends = []
@@ -240,6 +259,12 @@ class CoQADatasetPreprocessing:
                 labels.append(labels_)
                 decoder_attention_masks.append(decoder_attention_mask)
 
+                yng_label = answer_to_idx(examples["answer"])
+                is_yes_no = yng_label < 2
+                assert is_yes_no == (examples["answer_type"] == "yes_no")
+                yng_labels.append(yng_label)
+                yes_no_types.append(int(is_yes_no))
+
             ids.append(examples["id"][sample_idx])
             if "turn" in examples:
                 turns.append(examples["turn"][sample_idx])
@@ -258,6 +283,8 @@ class CoQADatasetPreprocessing:
             inputs["decoder_input_ids"] = decoder_input_ids
             inputs["labels"] = labels
             inputs["decoder_attention_mask"] = decoder_attention_masks
+            inputs["yng_label"] = yng_labels
+            inputs["yes_no"] = yes_no_types
         inputs["id"] = ids
         if len(turns) > 0:
             inputs["turn"] = turns

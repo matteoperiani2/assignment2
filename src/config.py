@@ -87,8 +87,8 @@ class Config:
     class WandbConfig:
         """Specify the parameters of `wandb.init`"""
 
-        project: str = "assignment2"
-        # entity: str = "simonemele999"
+        project: str = "nlp_assignment2"
+        entity: str = "nlp_assignment2"
 
     dataset: Dataset = Dataset()
     checkpoints: Checkpoints = Checkpoints()

@@ -1,12 +1,17 @@
+import os
 import torch
 
 import numpy as np
 
 
 import transformers
+import datasets
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
+
+from .preprocessing import CoQADatasetPreprocessing
+
 
 
 class DummyScheduler:
@@ -71,10 +76,12 @@ class DynamicPaddingCollatorForSeq2Seq:
             return_tensors = self.return_tensors
 
         # We have to pad the labels and other features not in  `tokenizer.model_input_names` before calling `tokenizer.pad`
-        # as this method won't pad them and needs them of the same length to return tensors.
+        # as `tokenizer.pad` method will pad only features in `tokenizer.model_input_names`
         tokenizer_input_names = set(self.tokenizer.model_input_names)
         for feature_name in features[0].keys():
-            if feature_name not in tokenizer_input_names:
+            if feature_name not in tokenizer_input_names and isinstance(
+                features[0][feature_name], list
+            ):
                 if feature_name.endswith("labels"):
                     self.pad_feature(feature_name, features, self.label_pad_token_id)
                 else:
@@ -167,3 +174,42 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
     print(f"Loaded checkpoint from '{checkpoint_path}'")
 
     return model, optimizer, scheduler, epoch, step, checkpoint_counter
+
+def prepare_inputs_for_train(
+    dataset: datasets.DatasetDict,
+    checkpoints: Dict[str, str],
+    filename_fn,
+    add_history=False,
+    num_processes=None,
+    verbose=True,
+    **preprocessing_kwargs,
+):
+    for name, checkpoint in checkpoints.items():
+        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
+        preprocessing = CoQADatasetPreprocessing(tokenizer, **preprocessing_kwargs)
+
+        if verbose:
+            print("Preparing inputs for", name, "...")
+
+        if not os.path.exists(filename_fn(name)):
+            dataset_ = dataset.map(
+                preprocessing.process_data_to_model_inputs,
+                fn_kwargs={"add_history": add_history},
+                batched=True,
+                remove_columns=dataset["train"].column_names,
+                num_proc=num_processes,
+            )
+
+            dataset_.save_to_disk(filename_fn(name))
+            del dataset_
+
+        if verbose:
+            dataset_ = datasets.load_from_disk(filename_fn(name))
+            print(dataset_)
+            print()
+            print("Showing some input examples:")
+            decoded_inputs = tokenizer.batch_decode(dataset_["train"][:5]["input_ids"])
+            for decoded in decoded_inputs:
+                print(decoded)
+            print()
+            del dataset_

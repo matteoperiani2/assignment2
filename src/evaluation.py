@@ -1,189 +1,180 @@
-from typing import Dict, Literal, Protocol
+from typing import List, Optional, Union
+import numpy as np
 
 import torch
-from torchmetrics.classification import BinaryAccuracy
 from torchmetrics.classification import MulticlassF1Score
 
-from src.squad_f1 import squad_f1
+import datasets
+from accelerate import Accelerator
+
+from .preprocessing import CoQADatasetPreprocessing, idx_to_answer
+from .squad_f1 import compute_f1
+from .train import DynamicPaddingCollatorForSeq2Seq
+from .utils import batched_function, logits_to_class, prepare_model_inputs
+from .config import Config
+
+CONFIG: Config = Config()
 
 
-class Metric(Protocol):
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
-        pass
+per_token_f1_metric = MulticlassF1Score(
+    num_classes=2,
+    average="macro",
+    multidim_average="samplewise",
+    ignore_index=-100,
+)
+
+macro_f1 = MulticlassF1Score(
+    num_classes=3,
+    average="macro",
+    ignore_index=-100,
+)
 
 
-class LogitsToClassMixin:
-    def __init__(self, task: Literal["binary", "multiclass"]) -> None:
-        if task == "binary":
-            self.logits_to_class = lambda logits: logits > 0.0
-        elif task == "multiclass":
-            self.logits_to_class = lambda logits: torch.argmax(logits, dim=-1)
-        else:
-            raise ValueError(
-                "Invalid task. Supported values are 'binary' and 'multiclass'."
-            )
+def labels_to_answer(labels: torch.Tensor, tokenizer, ignore_index=-100) -> str:
+    labels[labels == ignore_index] = tokenizer.pad_token_id
+    answer = tokenizer.decode(labels, skip_special_tokens=True)
+    return answer
 
 
-class AverageAccuracy:
-    def __init__(self, ignore_index=-100) -> None:
-        self.ignore_index = ignore_index
-
-    def __call__(
-        self, preds: torch.LongTensor, labels: torch.LongTensor
-    ) -> torch.FloatTensor:
-        assert preds.dtype == torch.long, "Input `preds` must be a long tensor"
-        assert labels.dtype == torch.long, "Input `labels` must be a long tensor"
-
-        valid_labels = labels != self.ignore_index
-        match = torch.sum((preds == labels) * valid_labels, dim=-1)
-        total = torch.sum(valid_labels, dim=-1)
-        per_sample_accuracy = match / total
-        return per_sample_accuracy.mean().item()
+def evaluate_answer(example: dict):
+    return {"answer_f1": compute_f1(example["answer"], example["pred_answer"])}
 
 
-class AverageAccuracyWithLogits(AverageAccuracy, LogitsToClassMixin):
-    def __init__(
-        self, task: Literal["binary", "multiclass"], ignore_index=-100
-    ) -> None:
-        AverageAccuracy.__init__(self, ignore_index=ignore_index)
-        LogitsToClassMixin.__init__(self, task=task)
-
-    def __call__(self, logits, labels: torch.Tensor) -> torch.FloatTensor:
-        return super().__call__(self.logits_to_class(logits).long(), labels.long())
-
-
-class AverageMacroF1:
-    def __init__(self, num_classes, ignore_index=-100, **kwargs) -> None:
-        self.num_classes = num_classes
-        self.f1_metric = MulticlassF1Score(
-            num_classes=num_classes,
-            average="macro",
-            multidim_average="samplewise",
-            ignore_index=ignore_index,
+def evaluate_rationale_f1(example: dict):
+    return {
+        "rationale_f1": per_token_f1_metric(
+            logits_to_class(example["rationale_logits"]).long(),
+            example["rationale_labels"].long(),
         )
-
-    def __call__(self, preds: torch.Tensor, labels: torch.Tensor) -> torch.FloatTensor:
-        """
-        Compute the average over samples of the average over sequence of the macro F1 score.
-
-        Args:
-            preds (torch.Tensor): Output preds with shape (batch_size, seq_length).
-            labels (torch.Tensor): Output labels with shape (batch_size, seq_length).
-
-        Returns:
-            float: Average of the average F1 score.
-        """
-
-        f1_score = self.f1_metric(preds.long(), labels.long())
-        return f1_score.mean().item()
+    }
 
 
-class AverageMacroF1WithLogits(AverageMacroF1, LogitsToClassMixin):
-    def __init__(
-        self, task: Literal["binary", "multiclass"], num_classes, ignore_index=-100
-    ) -> None:
-        AverageMacroF1.__init__(
-            self, num_classes=num_classes, ignore_index=ignore_index
-        )
-        LogitsToClassMixin.__init__(self, task=task)
+def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
+    accelerator = Accelerator(mixed_precision=config.mixed_precision)
+    model = accelerator.prepare(model)
+    model.eval()
 
-    def __call__(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.FloatTensor:
-        """
-        Compute the average over samples of the average over sequence of the macro F1 score.
+    collator = DynamicPaddingCollatorForSeq2Seq(tokenizer, model)
+    dataset = dataset.map(
+        lambda example: generate_answer_from_input_tensors(
+            model, tokenizer, example, collator
+        ),
+        batched=True,
+        batch_size=4,
+    )
+    dataset = dataset.map(
+        lambda example: {
+            "answer": labels_to_answer(example["labels"], tokenizer=tokenizer)
+        }
+    )
 
-        Args:
-            logits (torch.Tensor): Output logits with shape (batch_size, seq_length, num_classes).
-            labels (torch.Tensor): Output labels with shape (batch_size, seq_length).
+    # outputs = outputs.select_columns(["source", "passage", "question", "rationale", "answer", "pred_answer", "answer_type", 'yng_logits', 'rationale_logits'])
 
-        Returns:
-            float: Average of the average F1 score.
-        """
-        return super().__call__(self.logits_to_class(logits), labels)
+    dataset = dataset.map(evaluate_answer)
+    dataset = dataset.map(evaluate_rationale_f1)
 
+    yng_data = dataset.select_columns(["yng_logits", "yng_labels"])
+    yng_data = yng_data.map(
+        lambda example: {"yng_logits": logits_to_class(example["yng_logits"])}
+    )
+    yng_f1 = macro_f1(yng_data["yng_logits"], yng_data["yng_labels"])
 
-class EncoderDecoderRationaleAccuracy(Metric):
-    def __init__(self) -> None:
-        self.rationale_accuracy = AverageAccuracyWithLogits(task="binary")
+    rationale_f1 = np.mean(dataset["rationale_f1"])
+    answer_squad_f1 = np.mean(dataset["answer_f1"])
 
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        return self.rationale_accuracy(
-            outputs["encoder_rationale_logits"], targets["rationale_labels"]
-        )
-
-
-class EncoderRationaleAccuracy(Metric):
-    def __init__(self) -> None:
-        self.rationale_accuracy = AverageAccuracyWithLogits(task="binary")
-
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        return self.rationale_accuracy(
-            outputs["rationale_logits"], targets["rationale_labels"]
-        )
+    return dataset, {
+        "yng_f1": yng_f1,
+        "rationale_f1": rationale_f1,
+        "answer_squad_f1": answer_squad_f1,
+    }
 
 
-class EncoderDecoderRationaleF1(Metric):
-    def __init__(self) -> None:
-        self.rationale_f1 = AverageMacroF1WithLogits(task="binary", num_classes=2)
+def evaluate_answers(model, tokenizer, data):
+    model.eval()
+    model.to("cuda" if torch.cuda.is_available() else "cpu")
 
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        return self.rationale_f1(
-            outputs["encoder_rationale_logits"], targets["rationale_labels"]
-        )
+    preprocessing = CoQADatasetPreprocessing(tokenizer, **CONFIG.preprocessing.__dict__)
 
+    outputs = data.map(
+        lambda example: generate_answer(
+            model, tokenizer, preprocessing, example["passage"], example["question"]
+        ),
+        batched=True,
+        batch_size=4,
+    )
 
-class EncoderRationaleF1(Metric):
-    def __init__(self) -> None:
-        self.rationale_f1 = AverageMacroF1WithLogits(task="binary", num_classes=2)
+    outputs = outputs.select_columns(
+        [
+            "source",
+            "passage",
+            "question",
+            "rationale",
+            "answer",
+            "pred_answer",
+            "answer_type",
+        ]
+    )
 
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        return self.rationale_f1(
-            outputs["rationale_logits"], targets["rationale_labels"]
-        )
+    outputs = outputs.map(evaluate_answer)
 
-
-class GenerativeAccuracy(Metric):
-    def __init__(self) -> None:
-        self.generative_accuracy = AverageAccuracyWithLogits(task="multiclass")
-
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        return self.generative_accuracy(outputs["logits"], targets["labels"])
+    return outputs
 
 
-class GenerativeSquadF1(Metric):
-    def __init__(self, tokenizer, ignore_index=-100) -> None:
-        self.tokenizer = tokenizer
-        self.ignore_index = ignore_index
+def generate_answer(
+    model,
+    tokenizer,
+    preprocessing,
+    passage: Union[str, List[str]],
+    question: Union[str, List[str]],
+    history: Optional[Union[str, List[str]]] = None,
+) -> List[str]:
+    use_history = history is not None
+    preprocess = batched_function(preprocessing.preprocess_texts)
+    if isinstance(passage, str):
+        passage = [passage]
+        question = [question]
+        history = [history]
 
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        output_ids = outputs["output_ids"].long()
-        predictions = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
-        labels = targets["labels"].clone().long()
-        labels[labels == self.ignore_index] = self.tokenizer.pad_token_id
-        labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+    inputs = {
+        "id": list(range(len(passage))),
+        "passage": passage,
+        "question": question,
+    }
+    if use_history:
+        inputs["history"] = history
 
-        return squad_f1(predictions=predictions, targets=labels)
+    inputs = preprocess(inputs)
+    inputs = preprocessing.process_data_to_model_inputs(
+        inputs, add_history=use_history, padding="max_length"
+    )
+    inputs = inputs.convert_to_tensors("pt")
+
+    return generate_answer_from_input_tensors(model, tokenizer, inputs)
 
 
-class GenerativeSquadF1WithLogits(GenerativeSquadF1, LogitsToClassMixin):
-    def __init__(self, tokenizer, ignore_index=-100) -> None:
-        LogitsToClassMixin.__init__(self, task="multiclass")
-        GenerativeSquadF1.__init__(self, tokenizer=tokenizer, ignore_index=ignore_index)
+def generate_answer_from_input_tensors(model, tokenizer, inputs, collator):
+    features = [dict(zip(inputs.keys(), values)) for values in zip(*inputs.values())]
+    features = collator(features)
 
-    def __call__(
-        self, outputs: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.FloatTensor:
-        outputs = outputs.clone()
-        outputs["output_ids"] = self.logits_to_class(outputs["logits"]).long()
-        return super().__call__(outputs, targets)
+    encoder = model.get_encoder()
+    encoder_inputs = prepare_model_inputs(encoder, features)
+
+    inputs = prepare_model_inputs(model, features)
+    inputs.pop("decoder_input_ids", None)
+
+    with torch.no_grad():
+        encoder_outputs = model.encoder(**encoder_inputs, return_dict=True)
+        outputs = model.generate(**inputs)
+
+    answer_types = logits_to_class(encoder_outputs["yng_logits"], task="multiclass")
+    output_str = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+    for i in range(len(output_str)):
+        if answer_types[i] != 2:
+            output_str[i] = idx_to_answer(answer_types[i])
+
+    return {
+        "pred_answer": output_str,
+        "yng_logits": encoder_outputs["yng_logits"],
+        "rationale_logits": encoder_outputs["rationale_logits"],
+    }
