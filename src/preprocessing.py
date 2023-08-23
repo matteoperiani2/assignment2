@@ -9,9 +9,9 @@ from typing import List, Tuple
 
 
 def answer_to_idx(answer: str) -> int:
-    if answer == "yes":
+    if answer.lower() == "yes":
         return 0
-    if answer == "no":
+    if answer.lower() == "no":
         return 1
     return 2
 
