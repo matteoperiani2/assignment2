@@ -259,9 +259,9 @@ class CoQADatasetPreprocessing:
                 labels.append(labels_)
                 decoder_attention_masks.append(decoder_attention_mask)
 
-                yng_label = answer_to_idx(examples["answer"])
+                yng_label = answer_to_idx(examples["answer"][sample_idx])
                 is_yes_no = yng_label < 2
-                assert is_yes_no == (examples["answer_type"] == "yes_no")
+                assert is_yes_no == (examples["answer_type"][sample_idx] == "yes_no")
                 yng_labels.append(yng_label)
                 yes_no_types.append(int(is_yes_no))
 

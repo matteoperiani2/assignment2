@@ -15,6 +15,7 @@ from accelerate import Accelerator
 
 from typing import Dict, Tuple, Union
 
+from .train import DummyScheduler, DynamicPaddingCollatorForSeq2Seq, load_checkpoint, save_checkpoint
 from .evaluation import evaluate_model
 from .losses import ComputeLoss, EncoderDecoderLoss, EncoderRationaleLoss
 from .models import make_encoder_decoder_model, make_qa_encoder
@@ -270,7 +271,7 @@ def train(
 ):
     watch_list = [model]
 
-    accelerator = Accelerator(mixed_precision=config.mixed_precision)
+    accelerator = Accelerator(mixed_precision=config.mixed_precision, cpu=config.cpu)
     (
         model,
         optimizer,
@@ -552,7 +553,7 @@ def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.
 
 
 # def evaluate(model, train_dataloader, val_dataloader, metrics, config):
-#     accelerator = Accelerator(mixed_precision=config.mixed_precision)
+#     accelerator = Accelerator(mixed_precision=config.mixed_precision, cpu=config.cpu)
 #     model, train_dataloader, val_dataloader = accelerator.prepare(
 #         model, train_dataloader, val_dataloader
 #     )
