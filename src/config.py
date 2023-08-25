@@ -7,7 +7,7 @@ from src.generate_annotation import AnswerType
 
 @dataclass
 class Config:
-    @dataclass
+    
     class Dataset:
         train_url: str = "https://nlp.stanford.edu/data/coqa/coqa-train-v1.0.json"
         test_url: str = "https://nlp.stanford.edu/data/coqa/coqa-dev-v1.0.json"
