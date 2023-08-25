@@ -554,81 +554,10 @@ def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.
         outputs, metrics = evaluate_model(model, tokenizer, dataset, config)
         results[dataset_name] = (outputs, metrics)
 
-        for metric_name, metric_value in metrics.items():
-            print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-            wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
+        # for metric_name, metric_value in metrics.items():
+        #     print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
+        #     wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
         
         gc.collect()
         torch.cuda.empty_cache()
     return results
-
-
-# def evaluate(model, train_dataloader, val_dataloader, metrics, config):
-#     accelerator = Accelerator(mixed_precision=config.mixed_precision, cpu=config.cpu)
-#     model, train_dataloader, val_dataloader = accelerator.prepare(
-#         model, train_dataloader, val_dataloader
-#     )
-
-#     datasets = [("train", train_dataloader), ("val", val_dataloader)]
-#     for dataset_name, dataloader in datasets:
-#         if config.model_type == "encoder_decoder":
-#             encoder_results = evaluate_model(
-#                 model.encoder,
-#                 dataloader,
-#                 metrics["encoder"],
-#                 config,
-#                 get_encoder_outputs,
-#             )
-#             encoder_decoder_results = evaluate_model(
-#                 model,
-#                 dataloader,
-#                 metrics["encoder_decoder"],
-#                 config,
-#                 get_encoder_decoder_outputs,
-#             )
-#             results = {**encoder_results, **encoder_decoder_results}
-#         elif config.model_type == "encoder":
-#             results = evaluate_model(
-#                 model, dataloader, metrics["encoder"], config, get_encoder_outputs
-#             )
-#         else:
-#             raise ValueError(
-#                 "Invalid model_type. Supported values are 'encoder_decoder' and 'encoder'."
-#             )
-
-#         results = {
-#             metric_name: metric_value.avg()
-#             for metric_name, metric_value in results.items()
-#         }
-
-#         for metric_name, metric_value in results.items():
-#             print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-#             wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
-
-
-# def evaluate_model(model, dataloader, metrics, config, get_outputs):
-#     model.eval()
-
-#     avg_metrics = defaultdict(AvgValue)
-#     forward_signature = set(inspect.signature(model.forward).parameters)
-#     with torch.no_grad():
-#         for data in tqdm(dataloader):
-#             inputs_kwargs = {
-#                 arg: value for arg, value in data.items() if arg in forward_signature
-#             }
-#             n_samples = len(next(iter(data.values())))
-#             outputs = get_outputs(model, inputs_kwargs)
-
-#             for metric_name, metric in metrics.items():
-#                 metric_value = metric(outputs, data)
-#                 avg_metrics[metric_name].update(metric_value, n_samples)
-#     return avg_metrics
-
-
-# def get_encoder_outputs(model, inputs_kwargs):
-#     return model(**inputs_kwargs, return_dict=True)
-
-
-# def get_encoder_decoder_outputs(model, inputs_kwargs):
-#     inputs_kwargs.pop("decoder_input_ids", None)
-#     return {"output_ids": model.generate(**inputs_kwargs)}
