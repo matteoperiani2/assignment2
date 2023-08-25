@@ -267,6 +267,7 @@ def train(
     optimizer: torch.optim.Optimizer,
     lr_scheduler,
     config,
+    teacher_force_scheduler = None,
     # metrics: Dict[str, Metric] = {},
 ):
     watch_list = [model]
@@ -315,6 +316,7 @@ def train(
                 loss_fn=loss_fn,
                 optimizer=optimizer,
                 lr_scheduler=lr_scheduler,
+                teacher_force_scheduler=teacher_force_scheduler,
                 accelerator=accelerator,
                 config=config,
             )
@@ -393,6 +395,7 @@ def train_batch(
     optimizer,
     lr_scheduler,
     config,
+    teacher_force_scheduler=None,
     accelerator=None,
     device=None,
 ):
@@ -403,17 +406,22 @@ def train_batch(
     if accelerator is None:
         data = {key: value.to(device) for key, value in data.items()}
 
-    outputs = model(**inputs, return_dict=True)
+    outputs = model(**inputs, teacher_force=teacher_force_scheduler.get_value(), return_dict=True)
 
     loss, inner_losses = loss_fn(outputs, data)
     if accelerator is not None:
         accelerator.backward(loss)
     else:
         loss.backward()
+
+    if config.get("gradient_clip", "none") != "none":
+        torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+
     if step % config.accumulation_steps == 0:
         optimizer.step()
         optimizer.zero_grad()
     lr_scheduler.step()
+    teacher_force_scheduler.step()
 
     return loss.item(), inner_losses
 
@@ -549,6 +557,9 @@ def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.
         for metric_name, metric_value in metrics.items():
             print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
             wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
+        
+        gc.collect()
+        torch.cuda.empty_cache()
     return results
 
 

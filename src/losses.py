@@ -1,11 +1,13 @@
 from dataclasses import dataclass
-from typing import Dict, Protocol, Tuple
+from typing import Dict, Optional, Protocol, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+
+_EPSILON = 1e-7
 
 
 def apply_reduction(input: torch.Tensor, reduction: str, dim=0):
@@ -101,14 +103,22 @@ class UncertaintyLoss(nn.Module, ComputeLoss):
 
 
 def generative_loss(
-    logits: torch.FloatTensor, labels: torch.IntTensor, reduction: str = "mean"
+    logits: torch.FloatTensor,
+    labels: torch.IntTensor,
+    reduction: str = "mean",
+    mask: torch.Tensor = None,
 ) -> torch.FloatTensor:
+    if mask is not None:
+        logits = logits[mask.bool()]
+        labels = labels[mask.bool()]
+
     # swap seq_length with vocabulary dimension
     logits = torch.transpose(logits, 1, 2)  # batch_size x seq_length x vocab
     loss = F.cross_entropy(
         input=logits, target=labels, reduction="none"
     )  # batch_size x seq_length
     n_tokens_per_sample = torch.sum(labels != -100, dim=-1)  # batch_size
+    n_tokens_per_sample = torch.clamp(n_tokens_per_sample, min=_EPSILON)
     loss = torch.sum(loss, dim=-1) / n_tokens_per_sample  # batch_size
     return apply_reduction(loss, reduction=reduction)
 
@@ -117,72 +127,16 @@ class EncoderDecoderGenerativeLoss(Loss):
     def __init__(self, reduction: str = "mean") -> None:
         self.reduction = reduction
 
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
+    def __call__(
+        self,
+        outputs,
+        targets: Dict[str, torch.Tensor],
+        mask: torch.Tensor = None,
+    ) -> torch.FloatTensor:
         logits = outputs["logits"]
         labels = targets["labels"]
 
-        return generative_loss(logits, labels, reduction=self.reduction)
-
-
-# class RationaleLoss:
-#     def __init__(
-#         self,
-#         max_rationale_length,
-#         rationale_logits_name="rationale_logits",
-#         rationale_labels_name="rationale_labels",
-#         passage_mask_name="passage_mask",
-#     ) -> None:
-#         self.max_rationale_length = max_rationale_length
-#         self.rationale_logits_name = rationale_logits_name
-#         self.rationale_labels_name = rationale_labels_name
-#         self.passage_mask_name = passage_mask_name
-
-#     def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
-#         rationale_logits = outputs[self.rationale_logits_name]
-#         rationale_labels = targets[self.rationale_labels_name]
-#         passage_mask = targets[self.passage_mask_name]
-
-#         rationale_labels = rationale_labels * passage_mask
-#         totals = torch.sum(passage_mask, -1, keepdim=True)
-#         positives = torch.sum(rationale_labels, -1, keepdim=True)
-#         negatives = totals - positives
-#         weight = torch.where(
-#             rationale_labels == 1.0, totals / positives, totals / negatives
-#         )
-#         weight = torch.where(weight != torch.inf, weight, 0.0)
-#         # weight = torch.ones_like(rationale_labels)
-
-#         per_token_loss = F.binary_cross_entropy_with_logits(
-#             input=rationale_logits,
-#             target=rationale_labels,
-#             weight=weight,
-#             reduction="none",
-#         )
-
-#         per_token_loss = per_token_loss * passage_mask
-#         per_sequence_loss = torch.sum(per_token_loss, dim=-1) / torch.sum(
-#             weight * passage_mask, dim=-1
-#         )
-
-#         rationale_lengths = torch.sum(rationale_labels, -1)
-#         valid_rationales = rationale_lengths <= self.max_rationale_length
-#         n_sequences = torch.sum(valid_rationales, dim=-1)
-
-#         return torch.sum(per_sequence_loss * valid_rationales, dim=-1) / n_sequences
-
-
-# class rationale_loss(Loss):
-#     def __init__(
-#         self,
-#         max_rationale_length,
-#         rationale_logits_name="rationale_logits",
-#         rationale_labels_name="rationale_labels",
-#         passage_mask_name="passage_mask",
-#     ) -> None:
-#         self.max_rationale_length = max_rationale_length
-#         self.rationale_logits_name = rationale_logits_name
-#         self.rationale_labels_name = rationale_labels_name
-#         self.passage_mask_name = passage_mask_name
+        return generative_loss(logits, labels, reduction=self.reduction, mask=mask)
 
 
 # def rationale_loss(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
@@ -192,6 +146,7 @@ def rationale_loss(
     passage_mask: torch.IntTensor,
     max_rationale_length: int,
     reduction="mean",
+    mask: torch.Tensor = None,
 ) -> torch.FloatTensor:
     """
     li = w * BCE(y_pred_i, y_true_i)
@@ -214,6 +169,8 @@ def rationale_loss(
 
     rationale_lengths = torch.sum(labels, dim=-1)  # batch_size
     valid_rationales = rationale_lengths <= max_rationale_length
+    if mask is not None:
+        valid_rationales = valid_rationales & mask.bool()
 
     labels = labels[valid_rationales]
     passage_mask = passage_mask[valid_rationales]
@@ -229,7 +186,10 @@ def rationale_loss(
     )  # N x seq_length
     weights = torch.where(weights != torch.inf, weights, 0.0)  # N x seq_length
     weights = weights * passage_mask  # N x seq_length
-    weights = weights / torch.sum(weights, dim=-1, keepdim=True)  # N x seq_length
+    normalize_factor = torch.clamp(
+        torch.sum(weights, dim=-1, keepdim=True), min=_EPSILON
+    )
+    weights = weights / normalize_factor  # N x seq_length
     # weights = weights * valid_rationales / n_sequences
 
     # N x seq_length
@@ -249,7 +209,12 @@ class EncoderDecoderRationaleLoss(Loss):
         self.max_rationale_length = max_rationale_length
         self.reduction = reduction
 
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
+    def __call__(
+        self,
+        outputs,
+        targets: Dict[str, torch.Tensor],
+        mask: torch.Tensor = None,
+    ) -> torch.FloatTensor:
         logits = outputs["encoder_rationale_logits"]
         labels = targets["rationale_labels"]
         passage_mask = targets["passage_mask"]
@@ -260,6 +225,7 @@ class EncoderDecoderRationaleLoss(Loss):
             passage_mask,
             self.max_rationale_length,
             reduction=self.reduction,
+            mask=mask,
         )
 
 
@@ -268,7 +234,12 @@ class EncoderRationaleLoss(Loss):
         self.max_rationale_length = max_rationale_length
         self.reduction = reduction
 
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
+    def __call__(
+        self,
+        outputs,
+        targets: Dict[str, torch.Tensor],
+        mask: torch.Tensor = None,
+    ) -> torch.FloatTensor:
         logits = outputs["rationale_logits"]
         labels = targets["rationale_labels"]
         passage_mask = targets["passage_mask"]
@@ -279,42 +250,68 @@ class EncoderRationaleLoss(Loss):
             passage_mask,
             self.max_rationale_length,
             reduction=self.reduction,
+            mask=mask,
         )
 
 
-def yes_no_gen_loss(logits, labels, reduction="mean"):
+def yes_no_gen_loss(
+    logits: torch.FloatTensor,
+    labels: torch.IntTensor,
+    weight: Optional[torch.FloatTensor] = None,
+    reduction="mean",
+    mask: torch.Tensor = None,
+) -> torch.FloatTensor:
+    if mask is not None:
+        logits = logits[mask.bool()]
+        labels = labels[mask.bool()]
+
+    if weight is not None:
+        weight.to(logits.device)
+
     loss = F.cross_entropy(logits, labels, reduction=reduction)
     return loss
 
 
 class EncoderDecoderYNGLoss(Loss):
-    def __init__(self, reduction: str = "mean") -> None:
+    def __init__(
+        self, weight: Optional[torch.FloatTensor] = None, reduction: str = "mean"
+    ) -> None:
+        self.weight = weight
         self.reduction = reduction
 
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
+    def __call__(
+        self,
+        outputs,
+        targets: Dict[str, torch.Tensor],
+        mask: torch.Tensor = None,
+    ) -> torch.FloatTensor:
         logits = outputs["encoder_yng_logits"]
         labels = targets["yng_label"]
 
         return yes_no_gen_loss(
-            logits,
-            labels,
-            reduction=self.reduction,
+            logits, labels, weight=self.weight, reduction=self.reduction, mask=mask
         )
 
 
 class EncoderYNGLoss(Loss):
-    def __init__(self, max_rationale_length: int, reduction: str = "mean") -> None:
-        self.max_rationale_length = max_rationale_length
+    def __init__(self, weight: Optional[torch.FloatTensor] = None, reduction: str = "mean") -> None:
+        self.weight = weight
         self.reduction = reduction
 
-    def __call__(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
+    def __call__(
+        self,
+        outputs,
+        targets: Dict[str, torch.Tensor],
+        mask: torch.Tensor = None,) -> torch.FloatTensor:
         logits = outputs["yng_logits"]
         labels = targets["yng_label"]
 
         return yes_no_gen_loss(
             logits,
             labels,
+            weight=self.weight,
             reduction=self.reduction,
+            mask=mask
         )
 
 
@@ -328,36 +325,19 @@ class EncoderDecoderLoss(nn.Module):
     ) -> None:
         super().__init__()
 
-        # self.rationale_loss_fn = UncertaintyLoss(
-        #     name="rationale_loss",
-        #     loss_fn=EncoderDecoderRationaleLoss(
-        #         max_rationale_length=max_rationale_length
-        #     ),
-        #     initial_weight=rationale_loss_weight,
-        # )
+        self.yng_loss_weight = yng_loss_weight
+        self.rationale_loss_weight = rationale_loss_weight
+        self.generative_loss_weight = generative_loss_weight
 
-        # self.yes_no_gen_loss_fn = wrap_loss_fn(
-        #     name="yng_loss", loss_fn=EncoderDecoderYNGLoss()
-        # )
-
-        # self.rationale_loss_fn = wrap_loss_fn(
-        #     name="rationale_loss",
-        #     loss_fn=EncoderDecoderRationaleLoss(
-        #         max_rationale_length=max_rationale_length,
-        #         reduction="none"
-        #     ),
-        # )
-        # self.generative_loss_fn = wrap_loss_fn(
-        #     name="generative_loss",
-        #     loss_fn=EncoderDecoderGenerativeLoss(reduction="none"),
-        # )
-
-        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss(reduction="mean")
-
+        weight = torch.Tensor([1 / 11.0, 1 / 9.0, 1 / 80.0])
+        weight = weight / torch.sum(weight)
+        weight = None
+        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss(weight=weight)
+        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss()
         self.rationale_loss_fn = EncoderDecoderRationaleLoss(
-            max_rationale_length=max_rationale_length, reduction="none"
+            max_rationale_length=max_rationale_length
         )
-        self.generative_loss_fn = EncoderDecoderGenerativeLoss(reduction="none")
+        self.generative_loss_fn = EncoderDecoderGenerativeLoss()
 
     def forward(
         self, outputs, targets: Dict[str, torch.Tensor]
@@ -365,24 +345,18 @@ class EncoderDecoderLoss(nn.Module):
         yng_loss = self.yes_no_gen_loss_fn(outputs, targets)
 
         is_generative = ~targets["yes_no"].bool()
-        rationale_loss = self.rationale_loss_fn(outputs, targets)
-        rationale_loss = rationale_loss[is_generative]
-        rationale_loss = torch.mean(rationale_loss)
+        rationale_loss = self.rationale_loss_fn(outputs, targets, mask=is_generative)
+        generative_loss = self.generative_loss_fn(outputs, targets, mask=is_generative)
 
-        generative_loss = self.generative_loss_fn(outputs, targets)
-        generative_loss = generative_loss[is_generative]
-        generative_loss = torch.mean(generative_loss)
-
-        total_loss = yng_loss + rationale_loss + generative_loss
+        total_loss = (
+            self.yng_loss_weight * yng_loss
+            + self.rationale_loss_weight * rationale_loss
+            + self.generative_loss_weight * generative_loss
+        )
         loss_logs = {
             "yng_loss": yng_loss.item(),
             "rationale_loss": rationale_loss.item(),
             "generative_loss": generative_loss.item(),
         }
-
-        # total_loss = yng_loss + (1 - targets["yes_no"]) * (
-        #     rationale_loss + generative_loss
-        # )
-        # loss_logs = yng_loss_logs | rationale_loss_logs | generative_loss_logs
 
         return total_loss, loss_logs

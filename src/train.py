@@ -12,7 +12,26 @@ from typing import Any, Dict, Optional, Union
 
 from .preprocessing import CoQADatasetPreprocessing
 
+class Linear:
+    def __init__(
+        self, start_value:float, end_value:float, total_iters:int
+    ):
 
+        self.start_value = float(start_value)
+        self.end_value = float(end_value)
+        self.total_iters = total_iters
+        self.current_step = 0
+
+    def step(self):
+        self.current_step += 1
+
+    def get_value(self):
+        return (
+            self.start_value
+            + (self.end_value - self.start_value)
+            / self.total_iters
+            * self.current_step
+        )
 
 class DummyScheduler:
     def __init__(self, optimizer: torch.optim.Optimizer) -> None:

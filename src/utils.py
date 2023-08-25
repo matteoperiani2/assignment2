@@ -170,17 +170,23 @@ def explode_qa(dataset: pd.DataFrame):
 
 
 def plot_answer_type_distribution(qa_dataset: pd.DataFrame):
-    answer_type_distribution = qa_dataset.groupby("split")["answer_type"].value_counts(
+    plot_distribution(qa_dataset, field="answer_type", hue="split")
+
+def plot_distribution(dataset: pd.DataFrame, field: str, hue: str = None):
+    if hue is not None:
+        dataset = dataset.groupby(hue)
+
+    distribution = dataset[field].value_counts(
         normalize=True
     )
-    answer_type_distribution = answer_type_distribution.apply(
+    distribution = distribution.apply(
         lambda x: np.round(x, decimals=3) * 100
     )
-    answer_type_distribution = answer_type_distribution.rename(
+    distribution = distribution.rename(
         "frequency"
     ).reset_index()
     ax = sns.barplot(
-        answer_type_distribution, x="answer_type", y="frequency", hue="split"
+        distribution, x=field, y="frequency", hue=hue
     )
 
     for i in ax.containers:

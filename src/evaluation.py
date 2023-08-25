@@ -47,12 +47,14 @@ def evaluate_answer(example: dict):
 
 
 def evaluate_rationale_f1(example: dict):
-    return {
-        "rationale_f1": per_token_f1_metric(
-            logits_to_class(example["rationale_logits"], task="binary").long(),
-            example["rationale_labels"].long(),
-        )
-    }
+    rationale_f1 = per_token_f1_metric(
+        logits_to_class(example["rationale_logits"], task="binary").long(),
+        example["rationale_labels"].long(),
+    )
+    # Ensure it is an array, not a scalar
+    if rationale_f1.dim() == 0:
+        rationale_f1.unsqueeze_(dim=0)
+    return {"rationale_f1": rationale_f1}
 
 
 def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
@@ -65,7 +67,7 @@ def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
     dataset = dataset.map(
         lambda example: pad_input_tensors(example, collator),
         batched=True,
-        batch_size=32,
+        batch_size=config.generate_batch_size,
         load_from_cache_file=False,
     )
 
@@ -74,7 +76,7 @@ def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
     dataset = dataset.map(
         lambda example: generate_answer(model, tokenizer, example),
         batched=True,
-        batch_size=32,
+        batch_size=config.generate_batch_size,
         load_from_cache_file=False,
     )
 
@@ -85,12 +87,12 @@ def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
         load_from_cache_file=False,
     )
 
-    # outputs = outputs.select_columns(["source", "passage", "question", "rationale", "answer", "pred_answer", "answer_type", 'yng_logits', 'rationale_logits'])
-
     dataset = dataset.map(evaluate_answer, load_from_cache_file=False)
-
     dataset = dataset.map(
-        evaluate_rationale_f1, batched=True, batch_size=32, load_from_cache_file=False
+        evaluate_rationale_f1,
+        batched=True,
+        batch_size=config.generate_batch_size,
+        load_from_cache_file=False,
     )
 
     yng_data = dataset.select_columns(["yng_logits", "yng_label"])
@@ -99,7 +101,7 @@ def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
             "pred_yng_label": logits_to_class(example["yng_logits"], task="multiclass")
         },
         batched=True,
-        batch_size=32,
+        batch_size=config.generate_batch_size,
         load_from_cache_file=False,
     )
     macro_f1_ = macro_f1.to(model.device)
