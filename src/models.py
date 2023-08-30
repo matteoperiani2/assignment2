@@ -259,10 +259,13 @@ class QAEncoder(transformers.PreTrainedModel):
         # substitute the last_hidden_state[passage] with p_rationale * last_hidden_state[passage]
         # ideally, our network keeps only the span of the passage which represents the rationale
         if self.training:
-            if teacher_force is not None and torch.rand(1) < teacher_force:
-                p_rationale = rationale_labels.unsqueeze(-1)
+            if teacher_force is not None:
+                use_labels = torch.rand(rationale_labels.shape[0]) < teacher_force
+                use_labels = use_labels.to(p_rationale.device)
+                true_labels = rationale_labels.unsqueeze(-1).type(p_rationale.dtype)
+                p_rationale = torch.where(use_labels.reshape(-1, 1, 1), true_labels, p_rationale)
         else:
-            p_rationale = p_rationale > self.config.p_rationale_threshold
+            p_rationale = (p_rationale > self.config.p_rationale_threshold).type(p_rationale.dtype)
 
         weighted_passage_hidden_state = passage_mask * p_rationale * last_hidden_state
         qa_seq_hidden_state = (1 - passage_mask) * last_hidden_state

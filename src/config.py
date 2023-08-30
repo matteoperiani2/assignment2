@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import os
 from typing import Optional
 
-from src.generate_annotation import AnswerType
 
 
 @dataclass

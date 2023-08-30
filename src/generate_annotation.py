@@ -25,7 +25,6 @@ class AnswerType(Enum):
     @classmethod
     def list(cls, return_unknown=True):
         return [str(c) for c in cls if return_unknown or c != AnswerType.UNKNOWN]
-        return list(map(lambda c: str(c), cls))
 
 
 def annotate_with_answer_type(coqa_data: dict, use_additional_answers=True):

@@ -439,39 +439,3 @@ def fix_rationale(passage: str, rationale: str, span_start: int, span_end: int):
         passage, rationale, span_start=span_start, span_end=span_end
     )
     return passage[span_start:span_end], span_start, span_end
-
-
-# if __name__ == "__main__":
-#     from transformers import AutoTokenizer
-#     import datasets
-#     from config import *
-#     from utils import *
-#     CONFIG = Config()
-
-#     tokenizer = AutoTokenizer.from_pretrained(CONFIG.checkpoints.distil_roberta)
-#     preprocessing = CoQADatasetPreprocessing(tokenizer, use_window=True)
-
-#     raw_dataset = datasets.DatasetDict.load_from_disk(CONFIG.dataset.filtered_dir)
-#     train_dataset = raw_dataset["train"].select(range(10))
-
-#     train_dataset = train_dataset.map(
-#         batched_function(preprocessing.explode_questions, scalar_output=False),
-#         batched=True,
-#         remove_columns=raw_dataset["train"].column_names)
-#     train_dataset = train_dataset.map(batched_function(preprocessing.preprocess_texts), batched=True)
-
-
-#     data = train_dataset.select(range(2))
-#     inputs = preprocessing.prepare_inputs(data)
-
-#     idx = 0
-#     sample_idx = inputs["overflow_to_sample_mapping"][idx]
-
-#     input_ids = np.asarray(inputs["input_ids"][idx])
-#     passage_mask = np.asarray(inputs["passage_mask"][idx])
-#     rationale_mask = np.asarray(inputs["rationale_mask"][idx])
-#     rationale_start = inputs["rationale_start"][idx]
-#     rationale_end = inputs["rationale_end"][idx]
-
-#     passage = input_ids[passage_mask.astype(np.bool_)]
-#     rationale = input_ids[rationale_mask.astype(np.bool_)]

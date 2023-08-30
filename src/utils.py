@@ -9,7 +9,6 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-import transformers
 import datasets
 import torch
 import torch.nn as nn
@@ -17,22 +16,22 @@ from torch.utils.data import DataLoader
 
 from text_to_num import text2num
 
-from .preprocessing import CoQADatasetPreprocessing
 
 
 class AvgValue:
     def __init__(self, initial_value=0.0) -> None:
-        self.__total_value = initial_value
+        self.__value = initial_value
         self.__last_value = initial_value
         self.__n = 0
 
     def update(self, value, n=1):
         self.__last_value = value
-        self.__total_value += n * value
+        old_n = self.__n
         self.__n += n
+        self.__value = old_n / self.__n * self.__value + n / self.__n * value
 
-    def avg(self):
-        return self.__total_value / self.__n
+    def value(self):
+        return self.__value
 
     @property
     def last_value(self):
@@ -172,22 +171,15 @@ def explode_qa(dataset: pd.DataFrame):
 def plot_answer_type_distribution(qa_dataset: pd.DataFrame):
     plot_distribution(qa_dataset, field="answer_type", hue="split")
 
+
 def plot_distribution(dataset: pd.DataFrame, field: str, hue: str = None):
     if hue is not None:
         dataset = dataset.groupby(hue)
 
-    distribution = dataset[field].value_counts(
-        normalize=True
-    )
-    distribution = distribution.apply(
-        lambda x: np.round(x, decimals=3) * 100
-    )
-    distribution = distribution.rename(
-        "frequency"
-    ).reset_index()
-    ax = sns.barplot(
-        distribution, x=field, y="frequency", hue=hue
-    )
+    distribution = dataset[field].value_counts(normalize=True)
+    distribution = distribution.apply(lambda x: np.round(x, decimals=3) * 100)
+    distribution = distribution.rename("frequency").reset_index()
+    ax = sns.barplot(distribution, x=field, y="frequency", hue=hue)
 
     for i in ax.containers:
         ax.bar_label(
@@ -248,8 +240,11 @@ def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.Long
         raise ValueError(
             "Invalid task. Supported values are 'binary' and 'multiclass'."
         )
-    
-def prepare_model_inputs(model: nn.Module, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+
+def prepare_model_inputs(
+    model: nn.Module, inputs: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
     forward_signature = set(inspect.signature(model.forward).parameters)
     inputs = {
         argument: value.to(model.device)

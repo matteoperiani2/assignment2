@@ -1,4 +1,5 @@
 from typing import List, Optional, Union
+import numpy as np
 
 import torch
 from torchmetrics.classification import MulticlassF1Score
@@ -6,7 +7,7 @@ from torchmetrics.classification import MulticlassF1Score
 import datasets
 from accelerate import Accelerator
 
-from src.preprocessing import CoQADatasetPreprocessing, idx_to_answer
+from src.preprocessing import CoQADatasetPreprocessing
 from src.squad_f1 import compute_f1
 from src.train import DynamicPaddingCollatorForSeq2Seq
 from src.utils import batched_function, logits_to_class, prepare_model_inputs
@@ -48,7 +49,7 @@ def evaluate_answer(example: dict):
 
 def evaluate_rationale_f1(example: dict):
     rationale_f1 = per_token_f1_metric(
-        logits_to_class(example["rationale_logits"], task="binary").long(),
+        example["pred_rationale_labels"].long(),
         example["rationale_labels"].long(),
     )
     # Ensure it is an array, not a scalar
@@ -94,18 +95,8 @@ def evaluate_model(model, tokenizer, dataset: datasets.Dataset, config):
         batch_size=config.generate_batch_size,
         load_from_cache_file=False,
     )
-
-    yng_data = dataset.select_columns(["yng_logits", "yng_label"])
-    yng_data = yng_data.map(
-        lambda example: {
-            "pred_yng_label": logits_to_class(example["yng_logits"], task="multiclass")
-        },
-        batched=True,
-        batch_size=config.generate_batch_size,
-        load_from_cache_file=False,
-    )
     macro_f1_ = macro_f1.to(model.device)
-    yng_f1 = macro_f1_(yng_data["pred_yng_label"], yng_data["yng_label"]).item()
+    yng_f1 = macro_f1_(dataset["pred_yng_label"], dataset["yng_label"]).item()
 
     rationale_f1 = torch.mean(dataset["rationale_f1"]).item()
     answer_squad_f1 = torch.mean(dataset["answer_f1"]).item()
@@ -189,17 +180,26 @@ def generate_answer(model, tokenizer, inputs):
 
     with torch.no_grad():
         encoder_outputs = model.encoder(**encoder_inputs, return_dict=True)
-        outputs = model.generate(**inputs)
+        output_str = np.zeros(
+            encoder_outputs["last_hidden_state"].shape[0], dtype=np.string_
+        )
+        # outputs = model.generate(**inputs)
 
-    answer_types = logits_to_class(encoder_outputs["yng_logits"], task="multiclass")
-    output_str = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    # answer_types = logits_to_class(encoder_outputs["yng_logits"], task="multiclass")
+    # output_str = tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
-    for i in range(len(output_str)):
-        if answer_types[i] != 2:
-            output_str[i] = idx_to_answer(answer_types[i])
+    # for i in range(len(output_str)):
+    #     if answer_types[i] != 2:
+    #         output_str[i] = idx_to_answer(answer_types[i])
 
     return {
         "pred_answer": output_str,
         "yng_logits": encoder_outputs["yng_logits"],
+        "pred_yng_label": logits_to_class(
+            encoder_outputs["yng_logits"], task="multiclass"
+        ),
         "rationale_logits": encoder_outputs["rationale_logits"],
+        "pred_rationale_labels": logits_to_class(
+            encoder_outputs["rationale_logits"], task="binary"
+        ),
     }

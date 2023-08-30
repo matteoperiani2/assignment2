@@ -13,6 +13,9 @@ _EPSILON = 1e-7
 def apply_reduction(input: torch.Tensor, reduction: str, dim=0):
     if reduction == "none":
         return input
+
+    if input.shape[0] == 0:
+        input = torch.Tensor([0]).type(dtype=input.dtype).to(device=input.device)
     if reduction == "mean":
         return torch.mean(input, dim=dim)
     if reduction == "sum":
@@ -21,6 +24,17 @@ def apply_reduction(input: torch.Tensor, reduction: str, dim=0):
     raise ValueError(
         "Invalid reduction. Supported values are 'none', 'mean' and 'sum'."
     )
+
+def categorical_focal_loss_with_logits(input: torch.Tensor, target: torch.Tensor, weight: Optional[torch.Tensor]=None, alpha=1., gamma=2., reduction: str = "mean"):
+    ce_loss = F.cross_entropy(input, target, reduction="none")
+    pt = torch.exp(-ce_loss)
+    loss = alpha * (1-pt)**gamma * ce_loss
+
+    if weight is not None:
+        weight = weight[target.long()]
+        loss *= weight
+
+    return apply_reduction(loss, reduction=reduction)
 
 
 class Loss(Protocol):
@@ -120,7 +134,8 @@ def generative_loss(
     n_tokens_per_sample = torch.sum(labels != -100, dim=-1)  # batch_size
     n_tokens_per_sample = torch.clamp(n_tokens_per_sample, min=_EPSILON)
     loss = torch.sum(loss, dim=-1) / n_tokens_per_sample  # batch_size
-    return apply_reduction(loss, reduction=reduction)
+    loss = apply_reduction(loss, reduction=reduction)
+    return loss
 
 
 class EncoderDecoderGenerativeLoss(Loss):
@@ -181,6 +196,7 @@ def rationale_loss(
     totals = torch.sum(passage_mask, -1, keepdim=True)  # N x 1
     positives = torch.sum(labels, -1, keepdim=True)  # N x 1
     negatives = totals - positives  # N x 1
+    totals = torch.clamp(totals, min=_EPSILON).float()
     weights = torch.where(
         labels == 1.0, totals / positives, totals / negatives
     )  # N x seq_length
@@ -268,7 +284,8 @@ def yes_no_gen_loss(
     if weight is not None:
         weight.to(logits.device)
 
-    loss = F.cross_entropy(logits, labels, reduction=reduction)
+    # loss = F.cross_entropy(logits, labels, weight=weight, reduction=reduction)
+    loss = categorical_focal_loss_with_logits(logits, labels, weight=weight, reduction=reduction)
     return loss
 
 
@@ -294,7 +311,9 @@ class EncoderDecoderYNGLoss(Loss):
 
 
 class EncoderYNGLoss(Loss):
-    def __init__(self, weight: Optional[torch.FloatTensor] = None, reduction: str = "mean") -> None:
+    def __init__(
+        self, weight: Optional[torch.FloatTensor] = None, reduction: str = "mean"
+    ) -> None:
         self.weight = weight
         self.reduction = reduction
 
@@ -302,16 +321,13 @@ class EncoderYNGLoss(Loss):
         self,
         outputs,
         targets: Dict[str, torch.Tensor],
-        mask: torch.Tensor = None,) -> torch.FloatTensor:
+        mask: torch.Tensor = None,
+    ) -> torch.FloatTensor:
         logits = outputs["yng_logits"]
         labels = targets["yng_label"]
 
         return yes_no_gen_loss(
-            logits,
-            labels,
-            weight=self.weight,
-            reduction=self.reduction,
-            mask=mask
+            logits, labels, weight=self.weight, reduction=self.reduction, mask=mask
         )
 
 
@@ -329,10 +345,10 @@ class EncoderDecoderLoss(nn.Module):
         self.rationale_loss_weight = rationale_loss_weight
         self.generative_loss_weight = generative_loss_weight
 
-        weight = torch.Tensor([1 / 11.0, 1 / 9.0, 1 / 80.0])
-        weight = weight / torch.sum(weight)
-        weight = None
-        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss(weight=weight)
+        # weight = torch.Tensor([1 / 11.0, 1 / 9.0, 1 / 80.0])
+        # weight = weight / torch.sum(weight)
+        # weight = None
+        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss()
         self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss()
         self.rationale_loss_fn = EncoderDecoderRationaleLoss(
             max_rationale_length=max_rationale_length
@@ -342,9 +358,9 @@ class EncoderDecoderLoss(nn.Module):
     def forward(
         self, outputs, targets: Dict[str, torch.Tensor]
     ) -> Tuple[torch.FloatTensor, Dict[str, float]]:
-        yng_loss = self.yes_no_gen_loss_fn(outputs, targets)
-
         is_generative = ~targets["yes_no"].bool()
+
+        yng_loss = self.yes_no_gen_loss_fn(outputs, targets)
         rationale_loss = self.rationale_loss_fn(outputs, targets, mask=is_generative)
         generative_loss = self.generative_loss_fn(outputs, targets, mask=is_generative)
 

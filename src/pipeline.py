@@ -15,7 +15,14 @@ from accelerate import Accelerator
 
 from typing import Dict, Tuple, Union
 
-from .train import DummyScheduler, DynamicPaddingCollatorForSeq2Seq, load_checkpoint, save_checkpoint
+from .train import (
+    DummyLRScheduler,
+    DummyScheduler,
+    DynamicPaddingCollatorForSeq2Seq,
+    LinearScheduler,
+    load_checkpoint,
+    save_checkpoint,
+)
 from .evaluation import evaluate_model
 from .losses import ComputeLoss, EncoderDecoderLoss, EncoderRationaleLoss
 from .models import make_encoder_decoder_model, make_qa_encoder
@@ -83,6 +90,9 @@ def make(config):
     scheduler = make_scheduler(
         optimizer, steps_per_epoch=len(train_dataloader), config=config
     )
+    tf_scheduler = make_teacher_force_scheduler(
+        steps_per_epoch=len(train_dataloader), config=config
+    )
 
     # # Make the evaluation metrics
     # metrics = make_metrics(tokenizer, config)
@@ -97,6 +107,7 @@ def make(config):
         loss_fn,
         optimizer,
         scheduler,
+        tf_scheduler,
         # metrics,
     )
 
@@ -211,6 +222,18 @@ def make_loss(config) -> ComputeLoss:
 def make_optimizer(model, loss_fn, config):
     optimizer_cls = getattr(torch.optim, config.optimizer_name)
     parameters = [{"params": model.parameters()}]
+    # encoder = model.get_encoder()
+    # decoder = model.get_decoder()
+    # parameters = [
+    #             #   {"params": list(decoder.cls.parameters()), "lr": config.learning_rate * 10.},
+    #             #   {"params": list(encoder.rationale_head.parameters()), "lr": config.learning_rate / 5.},
+    #             #   {"params": list(encoder.yes_no_gen_head.parameters()), "lr": config.learning_rate / 10.},
+    #               ]
+    # params = set(model.parameters())
+    # for group in parameters:
+    #     params.difference_update(group["params"])
+    # parameters.insert(0, {"params": list(params)})
+
     if hasattr(loss_fn, "_parameters"):
         loss_params = {"params": loss_fn.parameters()}
         if "loss_learning_rate" in config:
@@ -235,7 +258,20 @@ def make_scheduler(optimizer, steps_per_epoch, config):
             num_training_steps=total_steps,
         )
 
-    return DummyScheduler(optimizer=optimizer)
+    return DummyLRScheduler(optimizer=optimizer)
+
+
+def make_teacher_force_scheduler(steps_per_epoch, config):
+    total_steps = steps_per_epoch * config.num_epochs
+    if config.get("teacher_force_scheduler", "none") != "none":
+        return LinearScheduler(
+            start_value=config.tf_start,
+            end_value=config.tf_end,
+            total_iters=total_steps,
+            fraction=config.tf_fraction,
+        )
+
+    return DummyScheduler()
 
 
 # def make_metrics(tokenizer, config) -> Dict[str, Metric]:
@@ -267,7 +303,7 @@ def train(
     optimizer: torch.optim.Optimizer,
     lr_scheduler,
     config,
-    teacher_force_scheduler = None,
+    teacher_force_scheduler=None,
     # metrics: Dict[str, Metric] = {},
 ):
     watch_list = [model]
@@ -308,6 +344,8 @@ def train(
                 if argument in forward_signature
             }
 
+            lr = lr_scheduler.get_last_lr()[0]
+            tf = teacher_force_scheduler.get_value() if teacher_force_scheduler is not None else 0.
             loss, inner_losses = train_batch(
                 inputs=inputs,
                 data=data,
@@ -333,7 +371,8 @@ def train(
                 {
                     "train_loss": loss,
                     **inner_losses,
-                    "lr": lr_scheduler.get_last_lr()[0],
+                    "lr": lr,
+                    "teacher_force": tf,
                 },
                 step=step,
             )
@@ -355,7 +394,8 @@ def train(
                     val_loss,
                     val_inner_losses,
                     val_metrics,
-                    lr=lr_scheduler.get_last_lr()[0],
+                    lr=lr,
+                    teacher_force=tf,
                     step=step,
                 )
                 avg_loss = AvgValue()
@@ -364,7 +404,7 @@ def train(
             if step % config.checkpoint_interval == 0:
                 # Saving checkpoint
                 save_model_checkpoint(
-                    model,
+                    accelerator.unwrap_model(model),
                     optimizer,
                     lr_scheduler,
                     epoch,
@@ -384,6 +424,7 @@ def train(
         torch.cuda.empty_cache()
 
     wandb.unwatch(watch_list)
+    accelerator.free_memory()
 
 
 def train_batch(
@@ -406,7 +447,9 @@ def train_batch(
     if accelerator is None:
         data = {key: value.to(device) for key, value in data.items()}
 
-    outputs = model(**inputs, teacher_force=teacher_force_scheduler.get_value(), return_dict=True)
+    outputs = model(
+        **inputs, teacher_force=teacher_force_scheduler.get_value(), return_dict=True
+    )
 
     loss, inner_losses = loss_fn(outputs, data)
     if accelerator is not None:
@@ -415,7 +458,10 @@ def train_batch(
         loss.backward()
 
     if config.get("gradient_clip", "none") != "none":
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
+        if accelerator is not None and accelerator.sync_gradients:
+            accelerator.clip_grad_norm_(model.parameters(), config.gradient_clip)
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip)
 
     if step % config.accumulation_steps == 0:
         optimizer.step()
@@ -470,21 +516,22 @@ def train_log(
     val_metrics: Dict[str, AvgValue],
     lr,
     step,
+    teacher_force,
 ):
-    train_loss = train_loss.avg()
+    train_loss = train_loss.value()
     train_inner_losses = {
-        f"{loss_name}": loss_value.avg()
+        f"{loss_name}": loss_value.value()
         for loss_name, loss_value in train_inner_losses.items()
     }
 
-    val_loss = val_loss.avg()
+    val_loss = val_loss.value()
     val_inner_losses = {
-        f"val_{loss_name}": loss_value.avg()
+        f"val_{loss_name}": loss_value.value()
         for loss_name, loss_value in val_inner_losses.items()
     }
 
     val_metrics = {
-        f"val_{metric_name}": metric_value.avg()
+        f"val_{metric_name}": metric_value.value()
         for metric_name, metric_value in val_metrics.items()
     }
 
@@ -496,6 +543,7 @@ def train_log(
             **val_inner_losses,
             **val_metrics,
             "lr": lr,
+            "teacher_force": teacher_force,
         },
         step=step,
     )
@@ -511,15 +559,16 @@ def train_log(
 def save_model_checkpoint(
     model, optimizer, lr_scheduler, epoch, step, checkpoint_counter, config
 ):
-    checkpoint_file = os.path.join(
+    checkpoint_dir = os.path.join(
         CONFIG.models.checkpoints_dir(
             config.model_name, config.get("history_length", 0) > 0
         ),
-        config.model_name,
-        f"checkpoint_{checkpoint_counter}.pt",
+        str(config.seed),
     )
-    create_dirs_for_file(checkpoint_file)
+    filename = f"checkpoint_{checkpoint_counter}.pt"
+    checkpoint_file = os.path.join(checkpoint_dir, filename)
 
+    create_dirs_for_file(checkpoint_file)
     save_checkpoint(
         model,
         optimizer,
@@ -529,7 +578,7 @@ def save_model_checkpoint(
         checkpoint_counter,
         checkpoint_path=checkpoint_file,
     )
-    wandb.save(f"{config.model_name}_{checkpoint_counter}.pt")
+    wandb.save(checkpoint_file)
 
 
 def load_model_checkpoint(
@@ -547,7 +596,9 @@ def load_model_checkpoint(
     )
 
 
-def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, config):
+def evaluate(
+    model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, config
+):
     datasets = [("train", train_data), ("val", val_data)]
     results = {}
     for dataset_name, dataset in datasets:
@@ -557,78 +608,7 @@ def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.
         for metric_name, metric_value in metrics.items():
             print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
             wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
-        
+
         gc.collect()
         torch.cuda.empty_cache()
     return results
-
-
-# def evaluate(model, train_dataloader, val_dataloader, metrics, config):
-#     accelerator = Accelerator(mixed_precision=config.mixed_precision, cpu=config.cpu)
-#     model, train_dataloader, val_dataloader = accelerator.prepare(
-#         model, train_dataloader, val_dataloader
-#     )
-
-#     datasets = [("train", train_dataloader), ("val", val_dataloader)]
-#     for dataset_name, dataloader in datasets:
-#         if config.model_type == "encoder_decoder":
-#             encoder_results = evaluate_model(
-#                 model.encoder,
-#                 dataloader,
-#                 metrics["encoder"],
-#                 config,
-#                 get_encoder_outputs,
-#             )
-#             encoder_decoder_results = evaluate_model(
-#                 model,
-#                 dataloader,
-#                 metrics["encoder_decoder"],
-#                 config,
-#                 get_encoder_decoder_outputs,
-#             )
-#             results = {**encoder_results, **encoder_decoder_results}
-#         elif config.model_type == "encoder":
-#             results = evaluate_model(
-#                 model, dataloader, metrics["encoder"], config, get_encoder_outputs
-#             )
-#         else:
-#             raise ValueError(
-#                 "Invalid model_type. Supported values are 'encoder_decoder' and 'encoder'."
-#             )
-
-#         results = {
-#             metric_name: metric_value.avg()
-#             for metric_name, metric_value in results.items()
-#         }
-
-#         for metric_name, metric_value in results.items():
-#             print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-#             wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
-
-
-# def evaluate_model(model, dataloader, metrics, config, get_outputs):
-#     model.eval()
-
-#     avg_metrics = defaultdict(AvgValue)
-#     forward_signature = set(inspect.signature(model.forward).parameters)
-#     with torch.no_grad():
-#         for data in tqdm(dataloader):
-#             inputs_kwargs = {
-#                 arg: value for arg, value in data.items() if arg in forward_signature
-#             }
-#             n_samples = len(next(iter(data.values())))
-#             outputs = get_outputs(model, inputs_kwargs)
-
-#             for metric_name, metric in metrics.items():
-#                 metric_value = metric(outputs, data)
-#                 avg_metrics[metric_name].update(metric_value, n_samples)
-#     return avg_metrics
-
-
-# def get_encoder_outputs(model, inputs_kwargs):
-#     return model(**inputs_kwargs, return_dict=True)
-
-
-# def get_encoder_decoder_outputs(model, inputs_kwargs):
-#     inputs_kwargs.pop("decoder_input_ids", None)
-#     return {"output_ids": model.generate(**inputs_kwargs)}
