@@ -41,6 +41,28 @@ class AvgValue:
     def n(self):
         return self.__n
 
+class PropertyDict(dict):
+    def __getattr__(self, key):
+        if key in self:
+            return self[key]
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{key}'"
+        )
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+class color:
+   PURPLE = '\033[95m'
+   CYAN = '\033[96m'
+   DARKCYAN = '\033[36m'
+   BLUE = '\033[94m'
+   GREEN = '\033[92m'
+   YELLOW = '\033[93m'
+   RED = '\033[91m'
+   BOLD = '\033[1m'
+   UNDERLINE = '\033[4m'
+   END = '\033[0m'
 
 ################# Reproducibility ######################à
 def set_seed(seed):
@@ -252,3 +274,16 @@ def prepare_model_inputs(
         if argument in forward_signature
     }
     return inputs
+    
+def print_conversation(passage, questions, answers, pred_answers, answers_f1, conv_f1):
+    out = color.BOLD + "Passage: " + color.END + passage + "\n"
+    out += "\n"
+    for q,a,p_a,a_f1 in zip(questions, answers, pred_answers, answers_f1):
+        out += color.BOLD + "Question: " + color.END + q + "\n"
+        out += color.BOLD + "Predicted Answer: " + color.END + p_a + "\n"
+        out += color.BOLD + "Answer: " + color.END + a + "\n"
+        out += color.BOLD + "Answer SQUAD-f1: " + color.END + str(a_f1) + "\n"
+        out += "\n"
+
+    out += color.BOLD + "Conversation SQUAD-f1: " + color.END + str(conv_f1) + "\n"
+    print(out)

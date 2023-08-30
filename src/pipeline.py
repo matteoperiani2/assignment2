@@ -596,12 +596,11 @@ def load_model_checkpoint(
     )
 
 
-def evaluate(
-    model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, config
-):
-    datasets = [("train", train_data), ("val", val_data)]
+def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, test_data: datasets.Dataset, config):
+    datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
     results = {}
     for dataset_name, dataset in datasets:
+        print(f"eval  {dataset_name}")
         outputs, metrics = evaluate_model(model, tokenizer, dataset, config)
         results[dataset_name] = (outputs, metrics)
 
@@ -611,4 +610,5 @@ def evaluate(
 
         gc.collect()
         torch.cuda.empty_cache()
+
     return results
