@@ -31,6 +31,12 @@ macro_f1 = MulticlassF1Score(
     ignore_index=-100,
 )
 
+f1 = MulticlassF1Score(
+    num_classes=3,
+    average="none",
+    ignore_index=-100,
+)
+
 wh = ["what", "when", "where", "which", "who", "how", "whose", "why"]
 
 
@@ -53,7 +59,7 @@ def evaluate_answer(example: dict):
 
 def evaluate_rationale_f1(example: dict):
     rationale_f1 = per_token_f1_metric(
-        logits_to_class(example["rationale_logits"], task="binary").long(),
+        example["pred_rationale_labels"].long(),
         example["rationale_labels"].long(),
     )
     # Ensure it is an array, not a scalar
@@ -106,26 +112,20 @@ def evaluate_tokenized_dataset(model, tokenizer, dataset: datasets.Dataset, conf
     dataset = dataset.map(evaluate_answer, load_from_cache_file=False)
 
     dataset = dataset.map(
-        evaluate_rationale_f1, batched=True, batch_size=32, load_from_cache_file=False
+        evaluate_rationale_f1, batched=True, batch_size=config.val_batch_size, load_from_cache_file=False
     )
 
-    yng_data = dataset.select_columns(["yng_logits", "yng_label"])
-    yng_data = yng_data.map(
-        lambda example: {
-            "pred_yng_label": logits_to_class(example["yng_logits"], task="multiclass")
-        },
-        batched=True,
-        batch_size=config.val_batch_size,
-        load_from_cache_file=False,
-    )
     macro_f1_ = macro_f1.to(model.device)
-    yng_f1 = macro_f1_(yng_data["pred_yng_label"], yng_data["yng_label"]).item()
+    f1_ = f1.to(model.device)
+    yng_f1_macro = macro_f1_(dataset["pred_yng_label"], dataset["yng_label"]).item()
+    yng_f1 = f1_(dataset["pred_yng_label"], dataset["yng_label"])
 
     rationales_f1 = torch.mean(dataset["rationale_f1"]).item()
     answers_squad_f1 = torch.mean(dataset["answer_f1"]).item()
 
     dataset.reset_format()
     return dataset, {
+        "yng_f1_macro": yng_f1_macro,
         "yng_f1": yng_f1,
         "rationales_f1": rationales_f1,
         "answers_squad_f1": answers_squad_f1,
@@ -227,7 +227,9 @@ def generate_answer(model, tokenizer, inputs):
     return {
         "pred_answer": output_str,
         "yng_logits": encoder_outputs["yng_logits"],
+        "pred_yng_label": logits_to_class(encoder_outputs["yng_logits"], task="multiclass"),
         "rationale_logits": encoder_outputs["rationale_logits"],
+        "pred_rationale_labels": logits_to_class(encoder_outputs["rationale_logits"], task="binary")
     }
 
 
@@ -258,8 +260,15 @@ def evaluate_conversation(model, tokenizer, df):
                     'answers': answers,
                     'predicted_answers' : pred_answer,
                     'answers_f1_scores' : answer_f1_scores,
-                    'conversation_f1_score' : np.mean(answer_f1_scores)}
+                    'conversation_f1_score' : np.mean(answer_f1_scores)
+                    }
 
         conversations_results.append(results)
 
     return conversations_results
+    
+def print_worst_answers(conv_res):
+    answers = [(ans,ans_f1)  for idx,answers in enumerate(conv_res["predicted_answers"]) for ans,ans_f1 in zip(answers, conv_res["answers_f1_scores"][idx]) if ans_f1 <= conv_res["conversation_f1_score"].min()]
+    ans_idx = [idx for idx,obj in enumerate(answers) if obj[1] == min(answers)[1]]
+
+    return np.random.choice(ans_idx, size=5) #return random 5 worst answers

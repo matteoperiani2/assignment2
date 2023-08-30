@@ -547,17 +547,15 @@ def load_model_checkpoint(
     )
 
 
-def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, config):
-    datasets = [("train", train_data), ("val", val_data)]
+def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, test_data: datasets.Dataset, config):
+    datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
     results = {}
     for dataset_name, dataset in datasets:
+        print(f"eval  {dataset_name}")
         outputs, metrics = evaluate_model(model, tokenizer, dataset, config)
         results[dataset_name] = (outputs, metrics)
 
-        # for metric_name, metric_value in metrics.items():
-        #     print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-        #     wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
-        
         gc.collect()
         torch.cuda.empty_cache()
+
     return results
