@@ -62,14 +62,17 @@ class Config:
                 history_str = "no_history"
             return os.path.join(self.__model_dir, model_name, history_str)
 
-        def checkpoints_dir(self, model_name, history: Optional[bool]):
-            return os.path.join(
+        def checkpoints_dir(self, model_name, history: Optional[bool], seed=None):
+            checkpoint_dir =  os.path.join(
                 self.model_dir(model_name, history=history), self.__checkpoints_dir_name
             )
+            if seed is not None:
+                checkpoint_dir = os.path.join(checkpoint_dir, str(seed))
+            return checkpoint_dir
 
-        def checkpoint(self, model_name, history: Optional[bool]):
+        def checkpoint(self, model_name, history: Optional[bool], seed=None):
             return os.path.join(
-                self.model_dir(model_name, history=history),
+                self.checkpoints_dir(model_name=model_name, history=history, seed=seed),
                 self.__final_checkpoint_name,
             )
 

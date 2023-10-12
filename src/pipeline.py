@@ -559,11 +559,8 @@ def train_log(
 def save_model_checkpoint(
     model, optimizer, lr_scheduler, epoch, step, checkpoint_counter, config
 ):
-    checkpoint_dir = os.path.join(
-        CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0
-        ),
-        str(config.seed),
+    checkpoint_dir = CONFIG.models.checkpoints_dir(
+            config.model_name, config.get("history_length", 0) > 0, seed=config.seed
     )
     filename = f"checkpoint_{checkpoint_counter}.pt"
     checkpoint_file = os.path.join(checkpoint_dir, filename)
@@ -586,9 +583,8 @@ def load_model_checkpoint(
 ):
     checkpoint_file = os.path.join(
         CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0
+            config.model_name, config.get("history_length", 0) > 0, seed=config.seed
         ),
-        config.model_name,
         f"checkpoint_{checkpoint_counter}.pt",
     )
     return load_checkpoint(
