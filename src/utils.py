@@ -263,21 +263,10 @@ def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.Long
             "Invalid task. Supported values are 'binary' and 'multiclass'."
         )
 
-
-def prepare_model_inputs(
-    model: nn.Module, inputs: Dict[str, torch.Tensor]
-) -> Dict[str, torch.Tensor]:
-    forward_signature = set(inspect.signature(model.forward).parameters)
-    inputs = {
-        argument: value.to(model.device)
-        for argument, value in inputs.items()
-        if argument in forward_signature
-    }
-    return inputs
     
 def print_conversation(passage, questions, answers, pred_answers, answers_f1, conv_f1):
     out = color.BOLD + "Passage: " + color.END + passage + "\n"
-    out += "\n"
+    out += ""
     for q,a,p_a,a_f1 in zip(questions, answers, pred_answers, answers_f1):
         out += color.BOLD + "Question: " + color.END + q + "\n"
         out += color.BOLD + "Predicted Answer: " + color.END + p_a + "\n"
@@ -287,3 +276,13 @@ def print_conversation(passage, questions, answers, pred_answers, answers_f1, co
 
     out += color.BOLD + "Conversation SQUAD-f1: " + color.END + str(conv_f1) + "\n"
     print(out)
+    
+    
+def print_source_name(source_name, num_asterix=100):
+    num_char = len(source_name)
+    print('\n')
+    print(f'#'*num_asterix)
+    print('#'*(((num_asterix-2) - num_char)//2), end=' ')
+    print(source_name.upper(), end=' ')
+    print('#'*((num_asterix-2) - ((num_asterix-2) - num_char)//2 - num_char))
+    print(f'#'*num_asterix, end='\n\n')

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import transformers
-from transformers import AutoTokenizer, AutoModel, EncoderDecoderModel
+from transformers import AutoModel, EncoderDecoderModel
 
 
 @dataclass
@@ -456,10 +456,11 @@ def make_encoder_decoder_model(
     checkpoint,
     decoder_max_length,
     generation_kwargs,
-    tokenizer: Optional[transformers.PreTrainedTokenizer] = None,
+    tokenizer,
     initialize_cross_attention=True,
 ):
-    tokenizer, encoder = make_qa_encoder(checkpoint, tokenizer=tokenizer)
+    encoder = make_qa_encoder(checkpoint)
+
     decoder = transformers.AutoModelForCausalLM.from_pretrained(
         checkpoint,
         is_decoder=True,
@@ -484,15 +485,11 @@ def make_encoder_decoder_model(
     if initialize_cross_attention:
         initialize_cross_attention_with_self_attention(model)
 
-    return tokenizer, model
+    return model
 
 
-def make_qa_encoder(
-    checkpoint, tokenizer: Optional[transformers.PreTrainedTokenizer] = None
-):
-    if tokenizer is None:
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+def make_qa_encoder(checkpoint):
     encoder = AutoModel.from_pretrained(checkpoint)
     encoder.config.p_rationale_threshold = 0.5
     encoder = QAEncoder(encoder, encoder.config)
-    return tokenizer, encoder
+    return encoder
