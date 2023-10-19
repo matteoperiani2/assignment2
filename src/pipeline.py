@@ -23,7 +23,7 @@ from .train import (
     load_checkpoint,
     save_checkpoint,
 )
-from .evaluation import evaluate_model
+from .evaluation import evaluate_generation
 from .losses import ComputeLoss, EncoderDecoderLoss, EncoderRationaleLoss
 from .models import make_encoder_decoder_model, make_qa_encoder
 from .utils import (
@@ -108,20 +108,28 @@ def make(config):
         optimizer,
         scheduler,
         tf_scheduler,
-        # metrics,
     )
 
 
-def make_model(config):
-    checkpoint = CONFIG.checkpoints.__dict__[config.checkpoint_name]
-    if config.model_type == "encoder_decoder":
+def make_tokenizer(config):
+    checkpoint = CONFIG.checkpoints.__dict__[config.get("checkpoint_name", 0)]
+    return transformers.AutoTokenizer.from_pretrained(checkpoint)
+
+
+def make_model(config, tokenizer=None):
+    checkpoint = CONFIG.checkpoints.__dict__[config.get("checkpoint_name", 0)]
+    if tokenizer is None:
+        ValueError("You should pass a not None tokenizer!")
+        
+    if config.get("model_type", 0) == "encoder_decoder":
         return make_encoder_decoder_model(
             checkpoint=checkpoint,
             decoder_max_length=CONFIG.decoder_max_length,
             generation_kwargs=CONFIG.generation,
-            initialize_cross_attention=config.initialize_cross_attention,
+            tokenizer=tokenizer,
+            initialize_cross_attention= config.get("initialize_cross_attention", 0),
         )
-    if config.model_type == "encoder":
+    if config.get("model_type", 0) == "encoder":
         return make_qa_encoder(checkpoint=checkpoint)
 
     raise ValueError(
@@ -608,13 +616,9 @@ def evaluate(
     datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
     results = {}
     for dataset_name, dataset in datasets:
-        print(f"eval  {dataset_name}")
-        outputs, metrics = evaluate_model(model, tokenizer, dataset, config)
+        print(f"Evaluation of  {dataset_name} set...")
+        outputs, metrics = evaluate_generation(model, tokenizer, dataset, config)
         results[dataset_name] = (outputs, metrics)
-
-        for metric_name, metric_value in metrics.items():
-            print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-            wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
 
         gc.collect()
         torch.cuda.empty_cache()
