@@ -32,7 +32,6 @@ class CoQADatasetPreprocessing:
         encoder_max_length=512,
         decoder_max_length=350,
         stride=196,
-        use_window=False,
         max_history_length=4,
     ) -> None:
         self.tokenizer = tokenizer
@@ -40,7 +39,6 @@ class CoQADatasetPreprocessing:
         self.encoder_max_length = encoder_max_length
         self.decoder_max_length = decoder_max_length
         self.stride = stride
-        self.use_window = use_window
         self.max_history_length = max_history_length
 
     def explode_questions(self, example):
@@ -312,7 +310,7 @@ class CoQADatasetPreprocessing:
             truncation="only_second",
             max_length=self.encoder_max_length,
             stride=self.stride,
-            return_overflowing_tokens=self.use_window,
+            return_overflowing_tokens=False,
             return_offsets_mapping=True,
         )
         return inputs
