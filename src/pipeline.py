@@ -130,10 +130,11 @@ def make_model(config):
 
 
 def get_data(split: str, config):
-    if config.get("history_length", 0) > 0:
-        path = CONFIG.dataset.train_with_history(config.checkpoint_name, split=split)
-    else:
-        path = CONFIG.dataset.train_no_history(config.checkpoint_name, split=split)
+    path = CONFIG.dataset.train(
+        config.checkpoint_name,
+        history=config.get("add_history", False),
+        split=split
+    )
 
     dataset = datasets.load_from_disk(path)
     dataset = dataset.remove_columns(
@@ -345,7 +346,11 @@ def train(
             }
 
             lr = lr_scheduler.get_last_lr()[0]
-            tf = teacher_force_scheduler.get_value() if teacher_force_scheduler is not None else 0.
+            tf = (
+                teacher_force_scheduler.get_value()
+                if teacher_force_scheduler is not None
+                else 0.0
+            )
             loss, inner_losses = train_batch(
                 inputs=inputs,
                 data=data,
@@ -560,7 +565,7 @@ def save_model_checkpoint(
     model, optimizer, lr_scheduler, epoch, step, checkpoint_counter, config
 ):
     checkpoint_dir = CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0, seed=config.seed
+        config.model_name, config.get("add_history", False), seed=config.seed
     )
     filename = f"checkpoint_{checkpoint_counter}.pt"
     checkpoint_file = os.path.join(checkpoint_dir, filename)
@@ -583,7 +588,7 @@ def load_model_checkpoint(
 ):
     checkpoint_file = os.path.join(
         CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0, seed=config.seed
+            config.model_name, config.get("add_history", False), seed=config.seed
         ),
         f"checkpoint_{checkpoint_counter}.pt",
     )
@@ -592,7 +597,14 @@ def load_model_checkpoint(
     )
 
 
-def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, test_data: datasets.Dataset, config):
+def evaluate(
+    model,
+    tokenizer,
+    train_data: datasets.Dataset,
+    val_data: datasets.Dataset,
+    test_data: datasets.Dataset,
+    config,
+):
     datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
     results = {}
     for dataset_name, dataset in datasets:

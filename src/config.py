@@ -29,6 +29,13 @@ class Config:
         processed_dir: str = os.path.join(data_dir, "processed")
         train_dir: str = os.path.join(data_dir, "train")
 
+        def train(self, model_name: str, history:bool, split=""):
+            if history:
+                get_dataset_dir = self.train_with_history
+            else:
+                get_dataset_dir = self.train_no_history
+            return get_dataset_dir(model_name, split=split)
+
         def train_no_history(self, model_name: str, split="") -> str:
             return os.path.join(self.train_dir, "train_no_history", model_name, split)
 
