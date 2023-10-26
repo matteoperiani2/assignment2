@@ -1,9 +1,12 @@
+from collections import Counter
 import inspect
 import itertools
 import os
 import pickle
 import random
 from typing import Dict, Literal, Union
+
+from nltk.corpus import stopwords
 
 import pandas as pd
 import numpy as np
@@ -16,7 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from text_to_num import text2num
-import tqdm
+from tqdm import tqdm
 
 
 class AvgValue:
@@ -134,10 +137,12 @@ def is_number(string: str) -> bool:
     except ValueError:
         return False
 
+
 def to_padded_tensor(list_of_list, pad_value=0):
     max_len = max([len(row) for row in list_of_list])
-    batch = [row + [pad_value]*(max_len - len(row)) for row in list_of_list]
+    batch = [row + [pad_value] * (max_len - len(row)) for row in list_of_list]
     return torch.as_tensor(batch)
+
 
 def batched_function(fn, scalar_output=True):
     def execute_on_batch(batch):
@@ -220,13 +225,12 @@ def plot_distribution(dataset: pd.DataFrame, field: str, hue: str = None):
     plt.tight_layout()
     plt.show()
 
+
 def plot_bar_with_title(data, x=None, y=None, hue=None, bar_label_rotation=0, **kwargs):
     ax = sns.barplot(data, x=x, y=y, hue=hue, **kwargs)
 
     for i in ax.containers:
-        ax.bar_label(
-            i, rotation=bar_label_rotation, padding=3
-        )
+        ax.bar_label(i, rotation=bar_label_rotation, padding=3)
     return ax
 
 
@@ -327,6 +331,7 @@ def val_map(dict: dict, function, keys=None, **fn_kwargs) -> dict:
         keys = dict.keys()
     return {k: function(v, **fn_kwargs) for k, v in dict.items() if k in keys}
 
+
 def plot_f1_bar(results: dict, splits=None):
     if splits is None:
         splits = results.keys()
@@ -340,10 +345,11 @@ def plot_f1_bar(results: dict, splits=None):
     ax = plot_bar_with_title(
         x, x="metric", y="value", hue="split", bar_label_rotation=90
     )
-    ax.tick_params(axis='x', labelrotation=45)
-    
+    ax.tick_params(axis="x", labelrotation=45)
+
     plt.tight_layout()
     plt.show()
+
 
 def unique_model_name(model_name, history=None, seed=""):
     name = model_name
@@ -352,6 +358,38 @@ def unique_model_name(model_name, history=None, seed=""):
     if history:
         name += "-history"
 
+
 def run_per_seed(fn, seeds=[42, 1337, 2022], **fn_kwargs):
     for seed in tqdm(seeds):
         fn(seed=seed, **fn_kwargs)
+
+
+
+def plot_word_bar(data, ax, n_words=20):
+    topic_words = [
+        z.lower() for y in [x.split() for x in data if isinstance(x, str)] for z in y
+    ]
+    word_count_dict = dict(Counter(topic_words))
+    popular_words = sorted(word_count_dict, key=word_count_dict.get, reverse=True)
+    popular_words_nonstop = [
+        w for w in popular_words if w not in stopwords.words("english")
+    ]
+    total = sum([word_count_dict[w] for w in reversed(popular_words_nonstop)])
+    ax.barh(
+        range(n_words),
+        [
+            word_count_dict[w] / total
+            for w in reversed(popular_words_nonstop[0:n_words])
+        ],
+    )
+    ax.set_yticks(
+        [x + 0.5 for x in range(n_words)], reversed(popular_words_nonstop[0:n_words])
+    )
+    for i in ax.containers:
+        ax.bar_label(i, padding=2)
+
+def plot_answer_distribution(predictions: datasets.Dataset):
+    _, axes = plt.subplots(1, 2, figsize=(15, 10))
+    for answer_kind, ax in zip(["answer", "pred_answer"], axes.ravel()):    
+        plot_word_bar(predictions[answer_kind], ax=ax)
+        ax.set_title(answer_kind)

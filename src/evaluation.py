@@ -92,13 +92,14 @@ def compute_summary_metrics(predictions: datasets.Dataset):
         results["rationale_f1"] = (rationale_f1, 1.0)
 
     if "pred_yng_label" in features and "yng_label" in features:
-        pred_label = predictions["pred_yng_label"].to("cpu")
-        true_label = predictions["yng_label"].to("cpu")
-        yng_f1_macro = macro_f1(pred_label, true_label).item()
-        yng_f1 = f1(pred_label, true_label).item()
+        true_labels = torch.as_tensor(predictions["yng_label"]).long()
+        pred_labels = torch.as_tensor(predictions["pred_yng_label"]).long()
+        yng_f1_macro = macro_f1(pred_labels, true_labels).item()
+        yng_f1 = f1(pred_labels, true_labels).tolist()
 
         results["yng_f1_macro"] = (yng_f1_macro, 1.0)
-        results["yng_f1"] = (yng_f1, 1.0)
+        for name, value in zip(["yes", "no", "gen"], yng_f1):
+            results[f"yng_{name}_f1"] = (value, 1.0)
 
     return results
 
