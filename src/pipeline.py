@@ -23,7 +23,6 @@ from .train import (
     load_checkpoint,
     save_checkpoint,
 )
-from .evaluation import evaluate_generation
 from .losses import ComputeLoss, EncoderDecoderLoss, EncoderRationaleLoss
 from .models import make_encoder_decoder_model, make_qa_encoder
 from .utils import (
@@ -69,7 +68,6 @@ def pipeline(hyperparameters: dict):
             teacher_force_scheduler=tf_scheduler,
         )
 
-        evaluate(model, tokenizer, train_data, val_data, config)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -115,17 +113,14 @@ def make_tokenizer(config):
     return transformers.AutoTokenizer.from_pretrained(checkpoint)
 
 
-def make_model(config, tokenizer=None):
+def make_model(config):
     checkpoint = CONFIG.checkpoints.__dict__[config.get("checkpoint_name", 0)]
-    if tokenizer is None:
-        ValueError("You should pass a not None tokenizer!")
 
     if config.get("model_type", 0) == "encoder_decoder":
         return make_encoder_decoder_model(
             checkpoint=checkpoint,
             decoder_max_length=CONFIG.decoder_max_length,
             generation_kwargs=CONFIG.generation,
-            tokenizer=tokenizer,
             initialize_cross_attention=config.get("initialize_cross_attention", 0),
         )
     if config.get("model_type", 0) == "encoder":
@@ -526,24 +521,3 @@ def load_model_checkpoint(
     return load_checkpoint(
         checkpoint_file, model, optimizer=optimizer, scheduler=lr_scheduler
     )
-
-
-def evaluate(
-    model,
-    tokenizer,
-    train_data: datasets.Dataset,
-    val_data: datasets.Dataset,
-    test_data: datasets.Dataset,
-    config,
-):
-    datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
-    results = {}
-    for dataset_name, dataset in datasets:
-        print(f"Evaluation of  {dataset_name} set...")
-        outputs, metrics = evaluate_generation(model, tokenizer, dataset, config)
-        results[dataset_name] = (outputs, metrics)
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    return results

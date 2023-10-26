@@ -198,9 +198,9 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, scheduler=None):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     if scheduler is not None:
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    epoch = checkpoint["epoch"]
-    step = checkpoint["step"]
-    checkpoint_counter = checkpoint["checkpoint_counter"]
+    epoch = checkpoint.get("epoch", -1)
+    step = checkpoint.get("step", -1)
+    checkpoint_counter = checkpoint.get("checkpoint_counter", -1)
 
     print(f"Loaded checkpoint from '{checkpoint_path}'")
 
