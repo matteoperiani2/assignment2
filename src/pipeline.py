@@ -23,7 +23,6 @@ from .train import (
     load_checkpoint,
     save_checkpoint,
 )
-from .evaluation import evaluate_model
 from .losses import ComputeLoss, EncoderDecoderLoss, EncoderRationaleLoss
 from .models import make_encoder_decoder_model, make_qa_encoder
 from .utils import (
@@ -53,8 +52,9 @@ def pipeline(hyperparameters: dict):
             loss_fn,
             optimizer,
             scheduler,
-            # metrics,
+            tf_scheduler,
         ) = make(config)
+
         print(model)
 
         train(
@@ -65,10 +65,9 @@ def pipeline(hyperparameters: dict):
             optimizer,
             scheduler,
             config,
-            # metrics=metrics,
+            teacher_force_scheduler=tf_scheduler,
         )
 
-        evaluate(model, tokenizer, train_data, val_data, config)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -80,7 +79,8 @@ def make(config):
     tokenizer, model = make_model(config)
 
     # Make the data
-    train_data, val_data = get_data("train", config), get_data("validation", config)
+    train_data = get_data("train", config)
+    val_data = get_data("validation", config)
     train_dataloader = make_dataloader(train_data, tokenizer, config, split="train")
     val_dataloader = make_dataloader(val_data, tokenizer, config, split="validation")
 
@@ -94,9 +94,6 @@ def make(config):
         steps_per_epoch=len(train_dataloader), config=config
     )
 
-    # # Make the evaluation metrics
-    # metrics = make_metrics(tokenizer, config)
-
     return (
         model,
         tokenizer,
@@ -108,20 +105,25 @@ def make(config):
         optimizer,
         scheduler,
         tf_scheduler,
-        # metrics,
     )
 
 
+def make_tokenizer(config):
+    checkpoint = CONFIG.checkpoints.__dict__[config.get("checkpoint_name", 0)]
+    return transformers.AutoTokenizer.from_pretrained(checkpoint)
+
+
 def make_model(config):
-    checkpoint = CONFIG.checkpoints.__dict__[config.checkpoint_name]
-    if config.model_type == "encoder_decoder":
+    checkpoint = CONFIG.checkpoints.__dict__[config.get("checkpoint_name", 0)]
+
+    if config.get("model_type", 0) == "encoder_decoder":
         return make_encoder_decoder_model(
             checkpoint=checkpoint,
             decoder_max_length=CONFIG.decoder_max_length,
             generation_kwargs=CONFIG.generation,
-            initialize_cross_attention=config.initialize_cross_attention,
+            initialize_cross_attention=config.get("initialize_cross_attention", 0),
         )
-    if config.model_type == "encoder":
+    if config.get("model_type", 0) == "encoder":
         return make_qa_encoder(checkpoint=checkpoint)
 
     raise ValueError(
@@ -130,10 +132,9 @@ def make_model(config):
 
 
 def get_data(split: str, config):
-    if config.get("history_length", 0) > 0:
-        path = CONFIG.dataset.train_with_history(config.checkpoint_name, split=split)
-    else:
-        path = CONFIG.dataset.train_no_history(config.checkpoint_name, split=split)
+    path = CONFIG.dataset.train(
+        config.checkpoint_name, history=config.get("add_history", False), split=split
+    )
 
     dataset = datasets.load_from_disk(path)
     dataset = dataset.remove_columns(
@@ -161,48 +162,6 @@ def make_dataloader(dataset, tokenizer, config, split: str):
 
 def make_loss(config) -> ComputeLoss:
     if config.model_type == "encoder_decoder":
-        # loss = composite_loss(
-        #     Criterion(
-        #         "rationale_loss", encoder_decoder_rationale_loss, weight=config.rationale_loss_weight
-        #     ),
-        #     Criterion(
-        #         "generative_loss", encoder_decoder_generative_loss, weight=config.generative_loss_weight
-        #     ),
-        # )
-        # loss = UncertaintyLoss(
-        #     Criterion(
-        #         "rationale_loss",
-        #         EncoderDecoderRationaleLoss(
-        #             max_rationale_length=CONFIG.rationale_max_length
-        #         ),
-        #         weight=config.rationale_loss_weight,
-        #     ),
-        #     Criterion(
-        #         "generative_loss",
-        #         encoder_decoder_generative_loss,
-        #         weight=config.generative_loss_weight,
-        #     ),
-        # )
-
-        # loss = CompositeLoss(
-        #     Criterion(
-        #         "rationale_loss",
-        #         UncertaintyLoss(
-        #             EncoderDecoderRationaleLoss(
-        #                 max_rationale_length=CONFIG.rationale_max_length
-        #             ),
-        #             initial_weight=config.rationale_loss_weight,
-        #         ),
-        #     ),
-        #     Criterion(
-        #         "generative_loss",
-        #         UncertaintyLoss(
-        #             encoder_decoder_generative_loss,
-        #             initial_weight=config.generative_loss_weight,
-        #         ),
-        #     ),
-        # )
-
         loss = EncoderDecoderLoss(
             max_rationale_length=CONFIG.rationale_max_length,
             yng_loss_weight=config.yng_loss_weight,
@@ -222,17 +181,6 @@ def make_loss(config) -> ComputeLoss:
 def make_optimizer(model, loss_fn, config):
     optimizer_cls = getattr(torch.optim, config.optimizer_name)
     parameters = [{"params": model.parameters()}]
-    # encoder = model.get_encoder()
-    # decoder = model.get_decoder()
-    # parameters = [
-    #             #   {"params": list(decoder.cls.parameters()), "lr": config.learning_rate * 10.},
-    #             #   {"params": list(encoder.rationale_head.parameters()), "lr": config.learning_rate / 5.},
-    #             #   {"params": list(encoder.yes_no_gen_head.parameters()), "lr": config.learning_rate / 10.},
-    #               ]
-    # params = set(model.parameters())
-    # for group in parameters:
-    #     params.difference_update(group["params"])
-    # parameters.insert(0, {"params": list(params)})
 
     if hasattr(loss_fn, "_parameters"):
         loss_params = {"params": loss_fn.parameters()}
@@ -272,27 +220,6 @@ def make_teacher_force_scheduler(steps_per_epoch, config):
         )
 
     return DummyScheduler()
-
-
-# def make_metrics(tokenizer, config) -> Dict[str, Metric]:
-#     if config.model_type not in ["encoder_decoder", "encoder"]:
-#         raise ValueError(
-#             "Invalid model_type. Supported values are 'encoder_decoder' and 'encoder'."
-#         )
-
-#     metrics = {}
-#     metrics["encoder"] = {
-#         "yng_accuracy": EncoderYNGAccuracy(),
-#         "yng_f1": EncoderYNGF1(),
-#         "rationale_accuracy": EncoderRationaleAccuracy(),
-#         "rationale_f1": EncoderRationaleF1(),
-#     }
-#     if config.model_type == "encoder_decoder":
-#         metrics["encoder_decoder"] = {
-#             "squad_f1": GenerativeSquadF1(tokenizer),
-#         }
-
-#     return metrics
 
 
 def train(
@@ -345,7 +272,11 @@ def train(
             }
 
             lr = lr_scheduler.get_last_lr()[0]
-            tf = teacher_force_scheduler.get_value() if teacher_force_scheduler is not None else 0.
+            tf = (
+                teacher_force_scheduler.get_value()
+                if teacher_force_scheduler is not None
+                else 0.0
+            )
             loss, inner_losses = train_batch(
                 inputs=inputs,
                 data=data,
@@ -401,7 +332,7 @@ def train(
                 avg_loss = AvgValue()
                 avg_inner_losses = defaultdict(AvgValue)
 
-            if step % config.checkpoint_interval == 0:
+            if (step % config.checkpoint_interval == 0) or (step == total_steps):
                 # Saving checkpoint
                 save_model_checkpoint(
                     accelerator.unwrap_model(model),
@@ -559,11 +490,8 @@ def train_log(
 def save_model_checkpoint(
     model, optimizer, lr_scheduler, epoch, step, checkpoint_counter, config
 ):
-    checkpoint_dir = os.path.join(
-        CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0
-        ),
-        str(config.seed),
+    checkpoint_dir = CONFIG.models.checkpoints_dir(
+        config.model_name, config.get("add_history", False), seed=config.seed
     )
     filename = f"checkpoint_{checkpoint_counter}.pt"
     checkpoint_file = os.path.join(checkpoint_dir, filename)
@@ -586,29 +514,10 @@ def load_model_checkpoint(
 ):
     checkpoint_file = os.path.join(
         CONFIG.models.checkpoints_dir(
-            config.model_name, config.get("history_length", 0) > 0
+            config.model_name, config.get("add_history", False), seed=config.seed
         ),
-        config.model_name,
         f"checkpoint_{checkpoint_counter}.pt",
     )
     return load_checkpoint(
         checkpoint_file, model, optimizer=optimizer, scheduler=lr_scheduler
     )
-
-
-def evaluate(model, tokenizer, train_data: datasets.Dataset, val_data: datasets.Dataset, test_data: datasets.Dataset, config):
-    datasets = [("train", train_data), ("val", val_data), ("test", test_data)]
-    results = {}
-    for dataset_name, dataset in datasets:
-        print(f"eval  {dataset_name}")
-        outputs, metrics = evaluate_model(model, tokenizer, dataset, config)
-        results[dataset_name] = (outputs, metrics)
-
-        for metric_name, metric_value in metrics.items():
-            print(f"{dataset_name}_{metric_name}: {metric_value:.4f}")
-            wandb.log({f"evaluation/{dataset_name}_{metric_name}": metric_value})
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    return results

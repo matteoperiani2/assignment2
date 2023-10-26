@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, Tuple
+from typing import List, Literal, Optional, Union, Tuple
 from dataclasses import dataclass
 import warnings
 
@@ -7,7 +7,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import transformers
-from transformers import AutoTokenizer, AutoModel, EncoderDecoderModel
+from transformers import AutoModel, AutoTokenizer, EncoderDecoderModel
+
+
+def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.LongTensor:
+    if task == "binary":
+        return (logits > 0.0).long()
+    elif task == "multiclass":
+        return torch.argmax(logits, dim=-1).long()
+    else:
+        raise ValueError(
+            "Invalid task. Supported values are 'binary' and 'multiclass'."
+        )
+
+def labels_to_answer(labels: torch.Tensor, tokenizer, ignore_index=-100) -> str:
+    labels[labels == ignore_index] = tokenizer.pad_token_id
+    answer = tokenizer.decode(labels, skip_special_tokens=True)
+    return answer
+
+
+def answer_to_idx(answer: str) -> int:
+    if answer.lower() == "yes":
+        return 0
+    if answer.lower() == "no":
+        return 1
+    return 2
+
+
+def idx_to_answer(idx: int) -> str:
+    if idx == 0:
+        return "yes"
+    if idx == 1:
+        return "no"
+    return None
 
 
 @dataclass
@@ -456,10 +488,11 @@ def make_encoder_decoder_model(
     checkpoint,
     decoder_max_length,
     generation_kwargs,
-    tokenizer: Optional[transformers.PreTrainedTokenizer] = None,
+    tokenizer=None,
     initialize_cross_attention=True,
 ):
     tokenizer, encoder = make_qa_encoder(checkpoint, tokenizer=tokenizer)
+
     decoder = transformers.AutoModelForCausalLM.from_pretrained(
         checkpoint,
         is_decoder=True,
@@ -487,9 +520,7 @@ def make_encoder_decoder_model(
     return tokenizer, model
 
 
-def make_qa_encoder(
-    checkpoint, tokenizer: Optional[transformers.PreTrainedTokenizer] = None
-):
+def make_qa_encoder(checkpoint, tokenizer: Optional[transformers.PreTrainedTokenizer] = None):
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     encoder = AutoModel.from_pretrained(checkpoint)

@@ -1,8 +1,12 @@
+from collections import Counter
 import inspect
 import itertools
 import os
+import pickle
 import random
-from typing import Dict, Literal
+from typing import Dict, Literal, Union
+
+from nltk.corpus import stopwords
 
 import pandas as pd
 import numpy as np
@@ -15,7 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from text_to_num import text2num
-
+from tqdm import tqdm
 
 
 class AvgValue:
@@ -41,6 +45,7 @@ class AvgValue:
     def n(self):
         return self.__n
 
+
 class PropertyDict(dict):
     def __getattr__(self, key):
         if key in self:
@@ -52,17 +57,19 @@ class PropertyDict(dict):
     def __setattr__(self, key, value):
         self[key] = value
 
+
 class color:
-   PURPLE = '\033[95m'
-   CYAN = '\033[96m'
-   DARKCYAN = '\033[36m'
-   BLUE = '\033[94m'
-   GREEN = '\033[92m'
-   YELLOW = '\033[93m'
-   RED = '\033[91m'
-   BOLD = '\033[1m'
-   UNDERLINE = '\033[4m'
-   END = '\033[0m'
+    PURPLE = "\033[95m"
+    CYAN = "\033[96m"
+    DARKCYAN = "\033[36m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+    END = "\033[0m"
+
 
 ################# Reproducibility ######################à
 def set_seed(seed):
@@ -84,12 +91,7 @@ def seed_worker(worker_id):
 
 def create_reproducible_dataloader(*args, **kwargs):
     generator = torch.Generator()
-    return DataLoader(
-        *args,
-        **kwargs,
-        #   worker_init_fn=seed_worker,
-        #   generator=generator
-    )
+    return DataLoader(*args, **kwargs, worker_init_fn=seed_worker, generator=generator)
 
 
 ###############################################################
@@ -103,6 +105,17 @@ def create_dirs_for_file(file_path):
 def ensure_dir_exists(path):
     if not os.path.exists(path):
         os.makedirs(path)
+
+
+def save_pickle(data, path):
+    create_dirs_for_file(path)
+    with open(path, "wb") as file:
+        pickle.dump(data, file, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_pickle(path):
+    with open(path, "rb") as file:
+        return pickle.load(file)
 
 
 def is_number(string: str) -> bool:
@@ -123,6 +136,12 @@ def is_number(string: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def to_padded_tensor(list_of_list, pad_value=0):
+    max_len = max([len(row) for row in list_of_list])
+    batch = [row + [pad_value] * (max_len - len(row)) for row in list_of_list]
+    return torch.as_tensor(batch)
 
 
 def batched_function(fn, scalar_output=True):
@@ -201,15 +220,18 @@ def plot_distribution(dataset: pd.DataFrame, field: str, hue: str = None):
     distribution = dataset[field].value_counts(normalize=True)
     distribution = distribution.apply(lambda x: np.round(x, decimals=3) * 100)
     distribution = distribution.rename("frequency").reset_index()
-    ax = sns.barplot(distribution, x=field, y="frequency", hue=hue)
-
-    for i in ax.containers:
-        ax.bar_label(
-            i,
-        )
+    plot_bar_with_title(distribution, x=field, y="frequency", hue=hue)
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_bar_with_title(data, x=None, y=None, hue=None, bar_label_rotation=0, **kwargs):
+    ax = sns.barplot(data, x=x, y=y, hue=hue, **kwargs)
+
+    for i in ax.containers:
+        ax.bar_label(i, rotation=bar_label_rotation, padding=3)
+    return ax
 
 
 def show_inputs(tokenizer, data, inputs):
@@ -253,32 +275,10 @@ def show_input(tokenizer, data, inputs, idx):
     print("History:", data["history"][sample_idx])
 
 
-def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.LongTensor:
-    if task == "binary":
-        return (logits > 0.0).long()
-    elif task == "multiclass":
-        return torch.argmax(logits, dim=-1).long()
-    else:
-        raise ValueError(
-            "Invalid task. Supported values are 'binary' and 'multiclass'."
-        )
-
-
-def prepare_model_inputs(
-    model: nn.Module, inputs: Dict[str, torch.Tensor]
-) -> Dict[str, torch.Tensor]:
-    forward_signature = set(inspect.signature(model.forward).parameters)
-    inputs = {
-        argument: value.to(model.device)
-        for argument, value in inputs.items()
-        if argument in forward_signature
-    }
-    return inputs
-    
 def print_conversation(passage, questions, answers, pred_answers, answers_f1, conv_f1):
     out = color.BOLD + "Passage: " + color.END + passage + "\n"
-    out += "\n"
-    for q,a,p_a,a_f1 in zip(questions, answers, pred_answers, answers_f1):
+    out += ""
+    for q, a, p_a, a_f1 in zip(questions, answers, pred_answers, answers_f1):
         out += color.BOLD + "Question: " + color.END + q + "\n"
         out += color.BOLD + "Predicted Answer: " + color.END + p_a + "\n"
         out += color.BOLD + "Answer: " + color.END + a + "\n"
@@ -287,3 +287,109 @@ def print_conversation(passage, questions, answers, pred_answers, answers_f1, co
 
     out += color.BOLD + "Conversation SQUAD-f1: " + color.END + str(conv_f1) + "\n"
     print(out)
+
+
+def print_source_name(source_name, num_asterix=100):
+    num_char = len(source_name)
+    print("\n")
+    print(f"#" * num_asterix)
+    print("#" * (((num_asterix - 2) - num_char) // 2), end=" ")
+    print(source_name.upper(), end=" ")
+    print("#" * ((num_asterix - 2) - ((num_asterix - 2) - num_char) // 2 - num_char))
+    print(f"#" * num_asterix, end="\n\n")
+
+
+def prepare_model_inputs(model, inputs):
+    forward_signature = set(inspect.signature(model.forward).parameters)
+    inputs = {
+        argument: value.to(model.device)
+        for argument, value in inputs.items()
+        if argument in forward_signature
+    }
+    return inputs
+
+
+def filter_model_inputs(model, inputs):
+    forward_signature = set(inspect.signature(model.forward).parameters)
+    inputs = {
+        argument: value
+        for argument, value in inputs.items()
+        if argument in forward_signature
+    }
+    return inputs
+
+
+def get_column_names(dataset: Union[datasets.Dataset, datasets.DatasetDict]):
+    column_names = dataset.column_names
+    if isinstance(column_names, dict):
+        column_names = next(iter(column_names.values()))
+    return column_names
+
+
+def val_map(dict: dict, function, keys=None, **fn_kwargs) -> dict:
+    if keys is None:
+        keys = dict.keys()
+    return {k: function(v, **fn_kwargs) for k, v in dict.items() if k in keys}
+
+
+def plot_f1_bar(results: dict, splits=None):
+    if splits is None:
+        splits = results.keys()
+    x = (
+        pd.DataFrame(results)
+        .applymap(lambda t: round(t[0] * 100, 2))
+        .reset_index()
+        .rename(columns={"index": "metric"})
+    )
+    x = x.melt(id_vars=["metric"], value_vars=splits, var_name="split")
+    ax = plot_bar_with_title(
+        x, x="metric", y="value", hue="split", bar_label_rotation=90
+    )
+    ax.tick_params(axis="x", labelrotation=45)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def unique_model_name(model_name, history=None, seed=""):
+    name = model_name
+    if seed:
+        name += "-seed"
+    if history:
+        name += "-history"
+
+
+def run_per_seed(fn, seeds=[42, 1337, 2022], **fn_kwargs):
+    for seed in tqdm(seeds):
+        fn(seed=seed, **fn_kwargs)
+
+
+
+def plot_word_bar(data, ax, n_words=20):
+    topic_words = [
+        z.lower() for y in [x.split() for x in data if isinstance(x, str)] for z in y
+    ]
+    word_count_dict = dict(Counter(topic_words))
+    popular_words = sorted(word_count_dict, key=word_count_dict.get, reverse=True)
+    popular_words_nonstop = [
+        w for w in popular_words if w not in stopwords.words("english")
+    ]
+    total = sum([word_count_dict[w] for w in reversed(popular_words_nonstop)])
+    ax.barh(
+        range(n_words),
+        [
+            word_count_dict[w] / total
+            for w in reversed(popular_words_nonstop[0:n_words])
+        ],
+    )
+    ax.set_yticks(
+        [x + 0.5 for x in range(n_words)], reversed(popular_words_nonstop[0:n_words])
+    )
+    for i in ax.containers:
+        ax.bar_label(i, padding=2)
+
+def plot_answer_distribution(predictions: datasets.Dataset):
+    _, axes = plt.subplots(1, 2, figsize=(15, 10))
+    for answer_kind, ax in zip(["answer", "pred_answer"], axes.ravel()):    
+        plot_word_bar(predictions[answer_kind], ax=ax)
+        ax.set_title(answer_kind)

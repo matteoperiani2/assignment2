@@ -8,22 +8,6 @@ import numpy as np
 from typing import List, Tuple
 
 
-def answer_to_idx(answer: str) -> int:
-    if answer.lower() == "yes":
-        return 0
-    if answer.lower() == "no":
-        return 1
-    return 2
-
-
-def idx_to_answer(idx: int) -> str:
-    if idx == 0:
-        return "yes"
-    if idx == 1:
-        return "no"
-    return None
-
-
 class CoQADatasetPreprocessing:
     def __init__(
         self,
@@ -32,7 +16,6 @@ class CoQADatasetPreprocessing:
         encoder_max_length=512,
         decoder_max_length=350,
         stride=196,
-        use_window=False,
         max_history_length=4,
     ) -> None:
         self.tokenizer = tokenizer
@@ -40,7 +23,6 @@ class CoQADatasetPreprocessing:
         self.encoder_max_length = encoder_max_length
         self.decoder_max_length = decoder_max_length
         self.stride = stride
-        self.use_window = use_window
         self.max_history_length = max_history_length
 
     def explode_questions(self, example):
@@ -158,19 +140,147 @@ class CoQADatasetPreprocessing:
             example["passage"] = white_space_fix(passage)
 
         return example
+    
 
-    def process_data_to_model_inputs(
-        self,
+    def __process_answer(self, examples, outputs, sample_idx):
+        # Remove <eos> from decoder_input_ids
+        decoder_input_ids_ = outputs.input_ids[sample_idx][:-1]
+        # Remove <bos> from labels
+        labels_ = outputs.input_ids[sample_idx].copy()[1:]
+        labels_ = [
+            self.label_pad_token_id
+            if token == self.tokenizer.pad_token_id
+            else token
+            for token in labels_
+        ]
+        decoder_attention_mask = outputs.attention_mask[sample_idx][:-1]
+
+        yng_label = answer_to_idx(examples["answer"][sample_idx])
+        is_yes_no = yng_label < 2
+        assert is_yes_no == (examples["answer_type"][sample_idx] == "yes_no")
+
+        return decoder_input_ids_, labels_, decoder_attention_mask, yng_label, is_yes_no
+
+    def __process_rationale(self,
         examples,
-        add_history=False,
-        padding=False,
-    ) -> transformers.BatchEncoding:
-        assert (
-            self.tokenizer is not None
-        ), "A tokenizer is required to prepare the inputs for the model"
-        process_rationale = "rationale" in examples
-        process_answer = "answer" in examples
+        sample_idx, 
+        offset,
+        passage_start,
+        passage_end,
+        sequence_ids,
+        passage_masks
+    ):
+        start_char = examples["span_start"][sample_idx]
+        end_char = examples["span_end"][sample_idx]
+        rationale_start, rationale_end = self.__char2token_rationale_span(
+            offset, (passage_start, passage_end), (start_char, end_char)
+        )
+        
+        rationale_labels_ = self.__create_mask(
+            sequence_ids, rationale_start, rationale_end, dtype=np.float32
+        )
+        rationale_labels_[passage_masks[-1] == 0] = self.label_pad_token_id
 
+        return rationale_start, rationale_end, rationale_labels_
+    
+    def __preprocess_inputs_for_train(self, examples, inputs, padding):
+        outputs = self.tokenizer(
+            examples["answer"],
+            padding=padding,
+            truncation=True,
+            max_length=self.decoder_max_length,
+        )
+
+        yes_no_types = []
+        yng_labels = []
+
+        rationale_starts = []
+        rationale_ends = []
+        rationale_labels = []
+        decoder_input_ids = []
+        labels = []
+        decoder_attention_masks = []
+
+        ids = []
+        turns = []
+        passage_masks = []
+        for sample_idx, offset in enumerate(inputs["offset_mapping"]):
+            sequence_ids = inputs.sequence_ids(sample_idx)
+
+            passage_start, passage_end = self.__find_passage(sequence_ids)
+            passage_masks.append(
+                self.__create_mask(sequence_ids, passage_start, passage_end + 1)
+            )
+
+            rationale_start, rationale_end, rationale_labels_ = self.__process_rationale(
+                examples,
+                sample_idx, 
+                offset,
+                passage_start,
+                passage_end,
+                sequence_ids,
+                passage_masks
+            )
+            rationale_starts.append(rationale_start)
+            rationale_ends.append(rationale_end)
+            rationale_labels.append(rationale_labels_)
+            
+            decoder_input_ids_, labels_, decoder_attention_mask, yng_label, is_yes_no = self.__process_answer(
+                examples,
+                outputs,
+                sample_idx
+            )
+            decoder_input_ids.append(decoder_input_ids_)
+            labels.append(labels_)
+            decoder_attention_masks.append(decoder_attention_mask)
+            yng_labels.append(yng_label)
+            yes_no_types.append(int(is_yes_no))
+
+
+            ids.append(examples["id"][sample_idx])
+            if "turn" in examples:
+                turns.append(examples["turn"][sample_idx])
+
+        inputs["id"] = ids
+        inputs["passage_mask"] = passage_masks
+        if len(turns) > 0:
+            inputs["turn"] = turns
+        inputs["rationale_start"] = rationale_starts
+        inputs["rationale_end"] = rationale_ends
+        inputs["rationale_labels"] = rationale_labels
+        inputs["decoder_input_ids"] = decoder_input_ids
+        inputs["labels"] = labels
+        inputs["decoder_attention_mask"] = decoder_attention_masks
+        inputs["yng_label"] = yng_labels
+        inputs["yes_no"] = yes_no_types
+        
+        return inputs
+
+
+    def __preprocess_inputs_for_eval(self, examples, inputs):
+        ids = []
+        turns = []
+        passage_masks = []
+        for sample_idx, _ in enumerate(inputs["offset_mapping"]):
+            sequence_ids = inputs.sequence_ids(sample_idx)
+            passage_start, passage_end = self.__find_passage(sequence_ids)
+            passage_masks.append(
+                self.__create_mask(sequence_ids, passage_start, passage_end + 1)
+            )
+
+            ids.append(examples["id"][sample_idx])
+            if "turn" in examples:
+                turns.append(examples["turn"][sample_idx])
+
+        inputs["id"] = ids
+        inputs["passage_mask"] = passage_masks
+        if len(turns) > 0:
+            inputs["turn"] = turns  
+
+        return inputs
+
+
+    def __get_inputs(self, examples, padding, add_history):
         sentences = [examples["question"], examples["passage"]]
 
         if add_history:
@@ -184,112 +294,32 @@ class CoQADatasetPreprocessing:
             truncation="only_second",
             max_length=self.encoder_max_length,
             stride=self.stride,
-            return_overflowing_tokens=self.use_window,
+            return_overflowing_tokens=False,
             return_offsets_mapping=True,
         )
-        if process_answer:
-            outputs = self.tokenizer(
-                examples["answer"],
-                padding=padding,
-                truncation=True,
-                max_length=self.decoder_max_length,
-            )
-
-        offset_mapping = inputs["offset_mapping"]
-        if self.use_window:
-            sample_map = lambda i: inputs["overflow_to_sample_mapping"][i]
-        else:
-            sample_map = lambda i: i
-
-        yes_no_types = []
-        yng_labels = []
-
-        passage_masks = []
-        rationale_starts = []
-        rationale_ends = []
-        rationale_labels = []
-        decoder_input_ids = []
-        labels = []
-        decoder_attention_masks = []
-
-        ids = []
-        turns = []
-
-        # # store the presence of the rationale in the passage for at least one row
-        # rationale_in_passage = [False] * len(examples["question"])
-        for i, offset in enumerate(offset_mapping):
-            sample_idx = sample_map(i)
-            sequence_ids = inputs.sequence_ids(i)
-
-            passage_start, passage_end = self.__find_passage(sequence_ids)
-            passage_masks.append(
-                self.__create_mask(sequence_ids, passage_start, passage_end + 1)
-            )
-
-            if process_rationale:
-                start_char = examples["span_start"][sample_idx]
-                end_char = examples["span_end"][sample_idx]
-                rationale_start, rationale_end = self.__char2token_rationale_span(
-                    offset, (passage_start, passage_end), (start_char, end_char)
-                )
-                rationale_starts.append(rationale_start)
-                rationale_ends.append(rationale_end)
-                rationale_labels_ = self.__create_mask(
-                    sequence_ids, rationale_start, rationale_end, dtype=np.float32
-                )
-                rationale_labels_[passage_masks[-1] == 0] = self.label_pad_token_id
-                rationale_labels.append(rationale_labels_)
-
-                # rationale_in_passage[sample_idx] |= rationale_start != -1
-
-            if process_answer:
-                # Remove <eos> from decoder_input_ids
-                decoder_input_ids_ = outputs.input_ids[sample_idx][:-1]
-                # Remove <bos> from labels
-                labels_ = outputs.input_ids[sample_idx].copy()[1:]
-                labels_ = [
-                    self.label_pad_token_id
-                    if token == self.tokenizer.pad_token_id
-                    else token
-                    for token in labels_
-                ]
-                decoder_attention_mask = outputs.attention_mask[sample_idx][:-1]
-
-                decoder_input_ids.append(decoder_input_ids_)
-                labels.append(labels_)
-                decoder_attention_masks.append(decoder_attention_mask)
-
-                yng_label = answer_to_idx(examples["answer"][sample_idx])
-                is_yes_no = yng_label < 2
-                assert is_yes_no == (examples["answer_type"][sample_idx] == "yes_no")
-                yng_labels.append(yng_label)
-                yes_no_types.append(int(is_yes_no))
-
-            ids.append(examples["id"][sample_idx])
-            if "turn" in examples:
-                turns.append(examples["turn"][sample_idx])
-
-        # if process_rationale:
-        #     for sample_idx, is_rationale_in_passage in enumerate(rationale_in_passage):
-        #         if not is_rationale_in_passage:
-        #             warnings.warn(f"The rationale is never contained in the passage. Id: {examples['id'][sample_idx]}, turn:{examples['turn'][sample_idx]}")
-
-        inputs["passage_mask"] = passage_masks
-        if process_rationale:
-            inputs["rationale_start"] = rationale_starts
-            inputs["rationale_end"] = rationale_ends
-            inputs["rationale_labels"] = rationale_labels
-        if process_answer:
-            inputs["decoder_input_ids"] = decoder_input_ids
-            inputs["labels"] = labels
-            inputs["decoder_attention_mask"] = decoder_attention_masks
-            inputs["yng_label"] = yng_labels
-            inputs["yes_no"] = yes_no_types
-        inputs["id"] = ids
-        if len(turns) > 0:
-            inputs["turn"] = turns
-
         return inputs
+
+
+    def process_data_to_model_inputs(
+        self,
+        examples,
+        add_history=False,
+        padding=False,
+    ) -> transformers.BatchEncoding:
+        assert (
+            self.tokenizer is not None
+        ), "A tokenizer is required to prepare the inputs for the model"
+
+        inputs = self.__get_inputs(examples, padding, add_history)
+
+        # if data are for training
+        if "answer" in examples:
+            model_inputs = self.__preprocess_inputs_for_train(examples, inputs, padding)
+        else:
+            model_inputs = self.__preprocess_inputs_for_eval(examples, inputs)
+
+        return model_inputs
+
 
     def __concat_history_and_question(self, histories, questions):
         outputs = []
