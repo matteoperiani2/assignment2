@@ -1,20 +1,17 @@
-import os
-import pickle
 import re
 import numpy as np
 from typing import Union
 import numpy as np
+import pandas as pd
 import torch
 
 from torchmetrics.classification import MulticlassF1Score
 
 import datasets
-import tqdm
 
 from src.generate_annotation import AnswerType
 from src.squad_f1 import compute_f1
 from src.utils import (
-    create_dirs_for_file,
     get_column_names,
     load_pickle,
     save_pickle,
@@ -104,8 +101,6 @@ def compute_summary_metrics(predictions: datasets.Dataset):
     return results
 
 
-
-
 def compute_f1_by_answer_type(predictions: datasets.Dataset):
     results = {}
     for answer_type in AnswerType.list(return_unknown=False):
@@ -126,115 +121,16 @@ def compute_avg_f1(predictions: datasets.Dataset, filter_fn=None):
     ratio = len(examples) / len(predictions)
     return avg_f1, ratio
 
-
-# def evaluate_generation(model, tokenizer, data, config, use_history=False):
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     model.eval()
-#     model.to(device)
-
-#     preprocessing = CoQADatasetPreprocessing(tokenizer, **CONFIG.preprocessing.__dict__)
-#     question_answerer = QuestionAnswerer(tokenizer, model, preprocessing)
-
-#     if not use_history:
-#         outputs = data.map(
-#             lambda example: question_answerer.generate_answer(
-#                 example["passage"], example["question"]
-#             ),
-#             batched=True,
-#             batch_size=config.get("generate_batch_size", 0),
-#             load_from_cache_file=False,
-#         )
-#     else:
-#         outputs = data.map(
-#             lambda example: question_answerer.generate_answer(
-#                 example["passage"], example["question"], example["history"]
-#             ),
-#             batched=True,
-#             batch_size=config.get("generate_batch_size", 0),
-#             load_from_cache_file=False,
-#         )
-
-#     outputs = outputs.map(compute_squad_f1, load_from_cache_file=False)
-
-#     outputs = outputs.select_columns(
-#         [
-#             "source",
-#             "passage",
-#             "question",
-#             "rationale",
-#             "answer",
-#             "pred_answer",
-#             "answer_type",
-#             "answer_f1",
-#         ]
-#     )
-
-#     yes_answer = outputs.filter(
-#         lambda ex: "yes" in re.findall(r"[\w']+", ex["answer"].lower()),
-#         load_from_cache_file=False,
-#     )
-#     no_answer = outputs.filter(
-#         lambda ex: "no" in re.findall(r"[\w']+", ex["answer"].lower()),
-#         load_from_cache_file=False,
-#     )
-#     mc_question = outputs.filter(
-#         lambda ex: "or" in re.findall(r"[\w']+", ex["question"].lower()),
-#         load_from_cache_file=False,
-#     )
-#     wh_question = outputs.filter(
-#         lambda ex: any(w in re.findall(r"[\w']+", ex["question"].lower()) for w in wh),
-#         load_from_cache_file=False,
-#     )
-
-#     len_data = len(outputs)
-#     return outputs, {
-#         "tot_squad_f1": (np.mean(outputs["answer_f1"]), 1),
-#         "yes_ans_f1": (np.mean(yes_answer["answer_f1"]), len(yes_answer) / len_data),
-#         "no_ans_f1": (np.mean(no_answer["answer_f1"]), len(no_answer) / len_data),
-#         "mc_quest_f1": (np.mean(mc_question["answer_f1"]), len(mc_question) / len_data),
-#         "wh_quest_f1": (np.mean(wh_question["answer_f1"]), len(wh_question) / len_data),
-#     }
-
-
-# def evaluate_conversation(model, tokenizer, df):
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     model.eval()
-#     model.to(device)
-
-#     preprocessing = CoQADatasetPreprocessing(tokenizer, **CONFIG.preprocessing.__dict__)
-#     question_answerer = QuestionAnswerer(tokenizer, model, preprocessing)
-
-#     conversations_results = []
-#     for _, row in tqdm(df.iterrows(), total=df.shape[0], leave=False):
-#         passage = row["story"]
-#         questions = [q["input_text"] for q in row["questions"]]
-#         answers = [a["input_text"] for a in row["answers"]]
-
-#         answer_f1_scores = []  # f1-score of single answers within the dialogue
-
-#         pred_answer = []
-#         for quest, answ in zip(questions, answers):
-#             outputs = question_answerer.generate_answer(passage, quest)
-#             pred_answer.append(outputs["pred_answer"][0])
-#             answer_f1_scores.append(
-#                 compute_squad_f1({"answer": answ, "pred_answer": pred_answer[-1]})[
-#                     "answer_f1"
-#                 ]
-#             )
-
-#         results = {
-#             "source": row["source"],
-#             "passage": passage,
-#             "questions": questions,
-#             "answers": answers,
-#             "predicted_answers": pred_answer,
-#             "answers_f1_scores": answer_f1_scores,
-#             "conversation_f1_score": np.mean(answer_f1_scores),
-#         }
-
-#         conversations_results.append(results)
-
-#     return conversations_results
+def evaluate_conversations(predictions: pd.DataFrame):
+    conv_results = []
+    for _,conv in predictions.groupby(by=["id"]):
+        conv_results.append({
+            "passage": conv["passage"].iloc[0], "source": conv["source"].iloc[0], "questions": conv["question"].tolist(), 
+            "answerws": conv["answer"].tolist(), "predicted_answers": conv["pred_answer"].tolist(),
+            "anwers_f1": conv["answer_f1"].tolist(), "conversation_f1": np.mean(conv["answer_f1"])
+        })
+    
+    return conv_results
 
 
 def print_worst_answers(conv_res):
@@ -255,7 +151,7 @@ def compute_squad_f1(example: dict):
 
 def compute_rationale_f1(batch: dict):
     true_labels = to_padded_tensor(batch["rationale_labels"], pad_value=-100).long()
-    pred_labels = to_padded_tensor(batch["pred_rationale_labels"]).long()    
+    pred_labels = to_padded_tensor(batch["pred_rationale_labels"]).long()
     rationale_f1 = per_token_f1_metric(
         pred_labels,
         true_labels,
@@ -266,11 +162,22 @@ def compute_rationale_f1(batch: dict):
     return {"rationale_f1": rationale_f1.tolist()}
 
 
-
-
 def save_results(results_per_model: dict):
     save_pickle(results_per_model, CONFIG.dataset.results)
 
 
-def load_results():
+def load_results() -> dict:
     return load_pickle(CONFIG.dataset.results)
+
+
+def get_model_results(model_name: str, history: bool):
+    history = "-history" if history else ""
+    regex = rf"^{model_name}-\d+{history}$"
+    results = load_results()
+    model_results = {}
+
+    for name, v in results.items():
+        if re.match(regex, name):
+            seed = re.search(r"(\d+)", name).group(1)
+            model_results[seed] = v
+    return model_results

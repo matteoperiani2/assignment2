@@ -164,13 +164,13 @@ def batched_function(fn, scalar_output=True):
     return execute_on_batch
 
 
-def create_dataframe(dataset: datasets.DatasetDict):
+def create_dataframe(dataset: datasets.DatasetDict, key_name="split"):
     dataset.set_format("pandas")
 
     dataset_ = []
     for split, ds in dataset.items():
         split_df = ds[:]
-        split_df["split"] = split
+        split_df[key_name] = split
         dataset_.append(split_df)
     dataset_ = pd.concat(dataset_)
     dataset_.reset_index(drop=True, inplace=True)
@@ -220,17 +220,31 @@ def plot_distribution(dataset: pd.DataFrame, field: str, hue: str = None):
     distribution = dataset[field].value_counts(normalize=True)
     distribution = distribution.apply(lambda x: np.round(x, decimals=3) * 100)
     distribution = distribution.rename("frequency").reset_index()
-    plot_bar_with_title(distribution, x=field, y="frequency", hue=hue)
+    plot_bar_with_bar_labels(distribution, x=field, y="frequency", hue=hue)
 
     plt.tight_layout()
     plt.show()
 
 
-def plot_bar_with_title(data, x=None, y=None, hue=None, bar_label_rotation=0, **kwargs):
+def plot_bar_with_bar_labels(
+    data,
+    x=None,
+    y=None,
+    hue=None,
+    bar_label_rotation=0,
+    bar_label_padding=3,
+    bar_label_type="edge",
+    **kwargs,
+):
     ax = sns.barplot(data, x=x, y=y, hue=hue, **kwargs)
 
     for i in ax.containers:
-        ax.bar_label(i, rotation=bar_label_rotation, padding=3)
+        ax.bar_label(
+            i,
+            rotation=bar_label_rotation,
+            padding=bar_label_padding,
+            label_type=bar_label_type,
+        )
     return ax
 
 
@@ -332,18 +346,61 @@ def val_map(dict: dict, function, keys=None, **fn_kwargs) -> dict:
     return {k: function(v, **fn_kwargs) for k, v in dict.items() if k in keys}
 
 
-def plot_f1_bar(results: dict, splits=None):
+def plot_f1_bar(results: dict, splits=None, multiple_seeds=False):
+    data = _prepare_data(results, splits=splits, multiple_seeds=multiple_seeds)
+    _plot_f1_bar(data, hue="split", multiple_seeds=multiple_seeds)
+
+
+def plot_models_f1_bar(results: dict, split: str, multiple_seeds=False):
+    dfs = []
+    for model, res in results.items():
+        x = _prepare_data(res, splits=split, multiple_seeds=multiple_seeds)
+        x["model"] = model
+        dfs.append(x)
+    data = pd.concat(dfs)
+
+    _plot_f1_bar(data, hue="model", multiple_seeds=multiple_seeds)
+
+
+def _prepare_data(results, splits, multiple_seeds):
     if splits is None:
-        splits = results.keys()
-    x = (
-        pd.DataFrame(results)
-        .applymap(lambda t: round(t[0] * 100, 2))
-        .reset_index()
-        .rename(columns={"index": "metric"})
-    )
-    x = x.melt(id_vars=["metric"], value_vars=splits, var_name="split")
-    ax = plot_bar_with_title(
-        x, x="metric", y="value", hue="split", bar_label_rotation=90
+        x = next(iter(results.values())) if multiple_seeds else results
+        splits = x.keys()
+
+    def prepare_data(results):
+        x = (
+            pd.DataFrame(results)
+            .applymap(lambda t: round(t[0] * 100, 2))
+            .reset_index()
+            .rename(columns={"index": "metric"})
+        )
+        return x.melt(id_vars=["metric"], value_vars=splits, var_name="split")
+
+    if multiple_seeds:
+        dfs = []
+        for seed, res in results.items():
+            x = prepare_data(res)
+            x["seed"] = seed
+            dfs.append(x)
+        x = pd.concat(dfs)
+    else:
+        x = prepare_data(results, splits)
+    return x
+
+
+def _plot_f1_bar(data, hue: str, multiple_seeds=False):
+    errorbar = ("sd", 2) if multiple_seeds else None
+    bar_label_type = "center" if multiple_seeds else "edge"
+
+    plt.figure(figsize=(15, 10))
+    ax = plot_bar_with_bar_labels(
+        data,
+        x="metric",
+        y="value",
+        hue=hue,
+        errorbar=errorbar,
+        bar_label_rotation=90,
+        bar_label_type=bar_label_type,
     )
     ax.tick_params(axis="x", labelrotation=45)
 
@@ -354,15 +411,15 @@ def plot_f1_bar(results: dict, splits=None):
 def unique_model_name(model_name, history=None, seed=""):
     name = model_name
     if seed:
-        name += "-seed"
+        name += f"-{seed}"
     if history:
         name += "-history"
+    return name
 
 
 def run_per_seed(fn, seeds=[42, 1337, 2022], **fn_kwargs):
     for seed in tqdm(seeds):
         fn(seed=seed, **fn_kwargs)
-
 
 
 def plot_word_bar(data, ax, n_words=20):
@@ -388,8 +445,9 @@ def plot_word_bar(data, ax, n_words=20):
     for i in ax.containers:
         ax.bar_label(i, padding=2)
 
+
 def plot_answer_distribution(predictions: datasets.Dataset):
     _, axes = plt.subplots(1, 2, figsize=(15, 10))
-    for answer_kind, ax in zip(["answer", "pred_answer"], axes.ravel()):    
+    for answer_kind, ax in zip(["answer", "pred_answer"], axes.ravel()):
         plot_word_bar(predictions[answer_kind], ax=ax)
         ax.set_title(answer_kind)
