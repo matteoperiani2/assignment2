@@ -15,7 +15,7 @@ from src.utils import (
     get_column_names,
     load_pickle,
     print_conversation,
-    print_question,
+    print_questions,
     print_header,
     save_pickle,
     to_padded_tensor,
@@ -206,11 +206,4 @@ def print_n_worst_questions_by_answer_type(predictions: pd.DataFrame, n=5):
         print_header(answer_type)
         worst_n = pred.sort_values(by=["answer_f1"], ascending=True).iloc[:n]
 
-        for _, w in worst_n.iterrows():
-            print_question(
-                w["passage"][:CONFIG.encoder_max_length],
-                w["question"],
-                w["answer"],
-                w["pred_answer"],
-                w["answer_f1"],
-            )
+        print_questions(worst_n, max_passage_length=CONFIG.encoder_max_length)
