@@ -8,22 +8,6 @@ import numpy as np
 from typing import List, Tuple
 
 
-def answer_to_idx(answer: str) -> int:
-    if answer.lower() == "yes":
-        return 0
-    if answer.lower() == "no":
-        return 1
-    return 2
-
-
-def idx_to_answer(idx: int) -> str:
-    if idx == 0:
-        return "yes"
-    if idx == 1:
-        return "no"
-    return None
-
-
 class CoQADatasetPreprocessing:
     def __init__(
         self,

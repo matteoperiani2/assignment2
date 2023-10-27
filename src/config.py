@@ -27,8 +27,11 @@ class Config:
         splitted_dir: str = os.path.join(data_dir, "splitted")
         processed_dir: str = os.path.join(data_dir, "processed")
         train_dir: str = os.path.join(data_dir, "train")
+        prediction_dir: str = os.path.join(data_dir, "prediction")
 
-        def train(self, model_name: str, history:bool, split=""):
+        results: str = os.path.join(data_dir, "results", "results.pkl")
+
+        def train(self, model_name: str, history: bool, split=""):
             if history:
                 get_dataset_dir = self.train_with_history
             else:
@@ -40,6 +43,41 @@ class Config:
 
         def train_with_history(self, model_name: str, split="") -> str:
             return os.path.join(self.train_dir, "train_with_history", model_name, split)
+
+        def __predictions(
+            self,
+            raw: bool,
+            model_name: str,
+            history: Optional[bool] = None,
+            seed: str = "",
+            split: str = ""
+        ):
+            if history is None:
+                history_str = ""
+            else:
+                history_str = "with_history" if history else "no_history"
+            raw = "raw" if raw else ""
+            return os.path.join(
+                self.prediction_dir, raw, history_str, model_name, str(seed), split
+            )
+
+        def raw_predictions(
+            self, model_name: str, history: Optional[bool] = None, seed: str = "", split=""
+        ):
+            return self.__predictions(
+                raw=True, model_name=model_name, history=history, seed=seed, split=split
+            )
+
+        def predictions(
+            self,
+            model_name: str,
+            history: Optional[bool] = None,
+            seed: str = "",
+            split="",
+        ):
+            return self.__predictions(
+                raw=False, model_name=model_name, history=history, seed=seed, split=split
+            )
 
     class Checkpoints:
         def __init__(
@@ -54,10 +92,14 @@ class Config:
             model_dir_name="models",
             checkpoint_dir_name="checkpoints",
             final_checkpoint_name="final.pt",
+            baseline="baseline.pt",
+            enc_dec_rationale="enc_dec_rationale.pt",
         ) -> None:
             self.__model_dir = model_dir_name
             self.__checkpoints_dir_name = checkpoint_dir_name
             self.__final_checkpoint_name = final_checkpoint_name
+            self.baseline = os.path.join(model_dir_name, baseline)
+            self.enc_dec_rationale = os.path.join(model_dir_name, enc_dec_rationale)
 
         def model_dir(self, model_name, history: Optional[bool] = None):
             if history is None:
@@ -69,7 +111,7 @@ class Config:
             return os.path.join(self.__model_dir, model_name, history_str)
 
         def checkpoints_dir(self, model_name, history: Optional[bool], seed=None):
-            checkpoint_dir =  os.path.join(
+            checkpoint_dir = os.path.join(
                 self.model_dir(model_name, history=history), self.__checkpoints_dir_name
             )
             if seed is not None:
@@ -87,7 +129,6 @@ class Config:
         encoder_max_length: int
         decoder_max_length: int
         stride: int = 196
-        use_window: bool = False
         max_history_length: int = 4
 
     @dataclass

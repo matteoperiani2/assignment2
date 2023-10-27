@@ -1,11 +1,9 @@
-from dataclasses import dataclass
 from typing import Dict, Optional, Protocol, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import numpy as np
 
 _EPSILON = 1e-7
 
@@ -25,10 +23,18 @@ def apply_reduction(input: torch.Tensor, reduction: str, dim=0):
         "Invalid reduction. Supported values are 'none', 'mean' and 'sum'."
     )
 
-def categorical_focal_loss_with_logits(input: torch.Tensor, target: torch.Tensor, weight: Optional[torch.Tensor]=None, alpha=1., gamma=2., reduction: str = "mean"):
+
+def categorical_focal_loss_with_logits(
+    input: torch.Tensor,
+    target: torch.Tensor,
+    weight: Optional[torch.Tensor] = None,
+    alpha=1.0,
+    gamma=2.0,
+    reduction: str = "mean",
+):
     ce_loss = F.cross_entropy(input, target, reduction="none")
     pt = torch.exp(-ce_loss)
-    loss = alpha * (1-pt)**gamma * ce_loss
+    loss = alpha * (1 - pt) ** gamma * ce_loss
 
     if weight is not None:
         weight = weight[target.long()]
@@ -47,73 +53,6 @@ class ComputeLoss(Protocol):
         outputs, targets: Dict[str, torch.Tensor]
     ) -> Tuple[torch.FloatTensor, Dict[str, float]]:
         pass
-
-
-def wrap_loss_fn(
-    name: str, loss_fn: Loss
-) -> Tuple[torch.FloatTensor, Dict[str, float]]:
-    def loss(outputs, targets):
-        loss_value = loss_fn(outputs, targets)
-        return loss_value, {name: loss_value.item()}
-
-    return loss
-
-
-@dataclass
-class Criterion:
-    name: str
-    loss_fn: Loss
-    weight: float = 1.0
-
-
-class UncertaintyLoss(nn.Module, ComputeLoss):
-    def __init__(self, name: str, loss_fn: Loss, initial_weight: float = 1.0) -> None:
-        super(UncertaintyLoss, self).__init__()
-        self.name = name
-        self.loss_fn = loss_fn
-        log_sigma_square = -np.log(initial_weight)
-        self.log_sigma_square = nn.Parameter(
-            torch.tensor(log_sigma_square, requires_grad=True, dtype=torch.float32)
-        )
-
-    def forward(
-        self, outputs, targets: Dict[str, torch.Tensor]
-    ) -> Tuple[torch.FloatTensor, Dict[str, float]]:
-        inner_loss = self.loss_fn(outputs, targets)
-        # 1/sigma^2 * L + 2 log sigma
-        weight = torch.exp(-self.log_sigma_square)
-        loss = weight * inner_loss + self.log_sigma_square
-
-        return loss, {
-            self.name: inner_loss.item(),
-            f"{self.name}_weight": weight.item(),
-        }
-
-
-# class UncertaintyLoss(nn.Module):
-#     def __init__(self, *criteria: Criterion) -> None:
-#         super(UncertaintyLoss, self).__init__()
-#         self.criteria = criteria
-#         weights = [criterion.weight for criterion in self.criteria]
-#         log_square_sigmas = -np.log(weights)
-#         self.log_square_sigmas = nn.Parameter(
-#             torch.tensor(log_square_sigmas, requires_grad=True, dtype=torch.float32)
-#         )
-
-#     def forward(
-#         self, outputs, targets: Dict[str, torch.Tensor]
-#     ) -> Tuple[torch.FloatTensor, Dict[str, float]]:
-#         losses = {}
-#         total_loss = 0.0
-#         for criterion, log_sigma_square in zip(self.criteria, self.log_square_sigmas):
-#             loss = criterion.loss_fn(outputs, targets)
-#             # 1/sigma^2 * L + 2 log sigma
-#             weight = torch.exp(-log_sigma_square)
-#             total_loss += weight * loss + log_sigma_square
-#             losses[f"{criterion.name}_weight"] = weight.item()
-#             losses[criterion.name] = loss.item()
-
-#         return total_loss, losses
 
 
 def generative_loss(
@@ -154,7 +93,6 @@ class EncoderDecoderGenerativeLoss(Loss):
         return generative_loss(logits, labels, reduction=self.reduction, mask=mask)
 
 
-# def rationale_loss(self, outputs, targets: Dict[str, torch.Tensor]) -> torch.FloatTensor:
 def rationale_loss(
     logits: torch.FloatTensor,
     labels: torch.IntTensor,
@@ -285,7 +223,9 @@ def yes_no_gen_loss(
         weight.to(logits.device)
 
     # loss = F.cross_entropy(logits, labels, weight=weight, reduction=reduction)
-    loss = categorical_focal_loss_with_logits(logits, labels, weight=weight, reduction=reduction)
+    loss = categorical_focal_loss_with_logits(
+        logits, labels, weight=weight, reduction=reduction
+    )
     return loss
 
 
@@ -345,10 +285,6 @@ class EncoderDecoderLoss(nn.Module):
         self.rationale_loss_weight = rationale_loss_weight
         self.generative_loss_weight = generative_loss_weight
 
-        # weight = torch.Tensor([1 / 11.0, 1 / 9.0, 1 / 80.0])
-        # weight = weight / torch.sum(weight)
-        # weight = None
-        self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss()
         self.yes_no_gen_loss_fn = EncoderDecoderYNGLoss()
         self.rationale_loss_fn = EncoderDecoderRationaleLoss(
             max_rationale_length=max_rationale_length

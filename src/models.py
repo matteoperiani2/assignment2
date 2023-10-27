@@ -1,4 +1,4 @@
-from typing import List, Optional, Union, Tuple
+from typing import List, Literal, Optional, Union, Tuple
 from dataclasses import dataclass
 import warnings
 
@@ -7,7 +7,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import transformers
-from transformers import AutoModel, EncoderDecoderModel
+from transformers import AutoModel, AutoTokenizer, EncoderDecoderModel
+
+
+def logits_to_class(logits, task: Literal["binary", "multiclass"]) -> torch.LongTensor:
+    if task == "binary":
+        return (logits > 0.0).long()
+    elif task == "multiclass":
+        return torch.argmax(logits, dim=-1).long()
+    else:
+        raise ValueError(
+            "Invalid task. Supported values are 'binary' and 'multiclass'."
+        )
+
+def labels_to_answer(labels: torch.Tensor, tokenizer, ignore_index=-100) -> str:
+    labels[labels == ignore_index] = tokenizer.pad_token_id
+    answer = tokenizer.decode(labels, skip_special_tokens=True)
+    return answer
+
+
+def answer_to_idx(answer: str) -> int:
+    if answer.lower() == "yes":
+        return 0
+    if answer.lower() == "no":
+        return 1
+    return 2
+
+
+def idx_to_answer(idx: int) -> str:
+    if idx == 0:
+        return "yes"
+    if idx == 1:
+        return "no"
+    return None
 
 
 @dataclass
@@ -256,17 +288,20 @@ class QAEncoder(transformers.PreTrainedModel):
 
         passage_mask = passage_mask.unsqueeze(-1)
         p_rationale = torch.sigmoid(rationale_logits)
-        # substitute the last_hidden_state[passage] with p_rationale * last_hidden_state[passage]
-        # ideally, our network keeps only the span of the passage which represents the rationale
         if self.training:
             if teacher_force is not None:
+                # Substitute p_rationale with the true rationale_labels with probability `teacher_force`
                 use_labels = torch.rand(rationale_labels.shape[0]) < teacher_force
                 use_labels = use_labels.to(p_rationale.device)
                 true_labels = rationale_labels.unsqueeze(-1).type(p_rationale.dtype)
                 p_rationale = torch.where(use_labels.reshape(-1, 1, 1), true_labels, p_rationale)
         else:
+            # Set p_rationale to 0 or 1 according to a threshold in inference mode
             p_rationale = (p_rationale > self.config.p_rationale_threshold).type(p_rationale.dtype)
-
+        
+        # Trick to substitute the hidden states of the passage with the corresponding hidden state reweighted by `p_rationale`
+        # last_hidden_state = (1 - passage_mask) * last_hidden_state + passage_mask * p_rationale * last_hidden_state
+        # i.e.substitute the last_hidden_state[passage] with p_rationale * last_hidden_state[passage]
         weighted_passage_hidden_state = passage_mask * p_rationale * last_hidden_state
         qa_seq_hidden_state = (1 - passage_mask) * last_hidden_state
         last_hidden_state = weighted_passage_hidden_state + qa_seq_hidden_state
@@ -456,10 +491,10 @@ def make_encoder_decoder_model(
     checkpoint,
     decoder_max_length,
     generation_kwargs,
-    tokenizer,
+    tokenizer=None,
     initialize_cross_attention=True,
 ):
-    encoder = make_qa_encoder(checkpoint)
+    tokenizer, encoder = make_qa_encoder(checkpoint, tokenizer=tokenizer)
 
     decoder = transformers.AutoModelForCausalLM.from_pretrained(
         checkpoint,
@@ -485,11 +520,13 @@ def make_encoder_decoder_model(
     if initialize_cross_attention:
         initialize_cross_attention_with_self_attention(model)
 
-    return model
+    return tokenizer, model
 
 
-def make_qa_encoder(checkpoint):
+def make_qa_encoder(checkpoint, tokenizer: Optional[transformers.PreTrainedTokenizer] = None):
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     encoder = AutoModel.from_pretrained(checkpoint)
     encoder.config.p_rationale_threshold = 0.5
     encoder = QAEncoder(encoder, encoder.config)
-    return encoder
+    return tokenizer, encoder
