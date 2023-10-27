@@ -37,7 +37,7 @@ def generate_predictions_from_train_ready_dataset(
         batch_size=batch_size,
         load_from_cache_file=False,
     )
-    
+
     outputs.reset_format()
     return outputs
 
@@ -66,59 +66,6 @@ def _pad_tensors(dataset: datasets.Dataset, batch_size, tokenizer, model):
 
     return dataset.with_format("torch", device=model.device)
 
-# def generate_predictions_from_train_ready_dataset(
-#     dataset: Union[datasets.Dataset, datasets.DatasetDict],
-#     tokenizer,
-#     model,
-#     batch_size=16,
-#     ignore_encoder_outputs=False,
-#     ignore_yng_head=False,
-# ):
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     model.eval()
-#     model.to(device)
-
-#     collator = DynamicPaddingCollatorForSeq2Seq(tokenizer, model)
-
-#     def pad_batch(inputs):
-#         inputs = filter_model_inputs(model, inputs)
-#         features = [
-#             dict(zip(inputs.keys(), values)) for values in zip(*inputs.values())
-#         ]
-#         features = collator(features)
-
-#         return features
-
-#     def get_answer_str(labels):
-#         labels = torch.as_tensor(labels)
-#         labels = torch.where(labels == -100, tokenizer.pad_token_id, labels)
-#         return tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-#     def generate_predictions(batch):
-#         batch = pad_batch(batch)
-#         outputs = generate_answer_from_input_tensors(
-#             batch,
-#             tokenizer=tokenizer,
-#             model=model,
-#             ignore_encoder_outputs=ignore_encoder_outputs,
-#             ignore_yng_head=ignore_yng_head,
-#         )
-#         outputs["answer"] = get_answer_str(batch["labels"])
-#         return outputs
-
-#     # we sort by n_tokens to optimize memory usage
-#     dataset = dataset.map(lambda example: {"n_tokens": len(example["input_ids"])})
-#     dataset = dataset.sort("n_tokens", reverse=True)
-
-#     outputs = dataset.map(
-#         generate_predictions,
-#         batched=True,
-#         batch_size=batch_size,
-#         load_from_cache_file=False,
-#     )
-#     outputs.reset_format()
-
-#     return outputs
 
 def generate_answer_from_input_tensors(
     inputs,
@@ -193,7 +140,7 @@ def generate_predictions(
 
 
 class QuestionAnswerer:
-    def __init__(self, tokenizer, model, preprocessing):
+    def __init__(self, tokenizer, model):
         self.model = model
         self.tokenizer = tokenizer
         self.preprocessing = CoQADatasetPreprocessing(
@@ -207,6 +154,7 @@ class QuestionAnswerer:
         history: Optional[Union[str, List[str]]] = None,
         ignore_encoder_outputs=False,
         ignore_yng_head=False,
+        return_outputs=False
     ) -> List[str]:
         use_history = history is not None
         preprocess = batched_function(self.preprocessing.preprocess_texts)
@@ -231,16 +179,20 @@ class QuestionAnswerer:
         )
         inputs = inputs.convert_to_tensors("pt")
 
-        return generate_answer_from_input_tensors(
+        outputs = generate_answer_from_input_tensors(
             inputs,
             tokenizer=self.tokenizer,
             model=self.model,
             ignore_encoder_outputs=ignore_encoder_outputs,
             ignore_yng_head=ignore_yng_head,
         )
-    
+        return outputs if return_outputs else outputs["pred_answer"]
+
+
 def create_prediction_dataset(tokenizer, model_name, history=None, seed=""):
-    raw_prediction_path = CONFIG.dataset.raw_predictions(model_name=model_name, history=history, seed=seed)
+    raw_prediction_path = CONFIG.dataset.raw_predictions(
+        model_name=model_name, history=history, seed=seed
+    )
 
     text_dataset = datasets.load_from_disk(CONFIG.dataset.processed_dir)
     prediction_dataset = datasets.load_from_disk(raw_prediction_path)
@@ -248,15 +200,31 @@ def create_prediction_dataset(tokenizer, model_name, history=None, seed=""):
     prediction_dataset.set_format("pandas")
 
     def merge(text_dataset, prediction_dataset):
-        prediction_columns = ["id", "turn", "input_ids", "rationale_start", "rationale_end", "rationale_labels", "passage_mask", "yng_label", "pred_answer", "pred_yng_label", "pred_rationale_labels"]
-        prediction_columns = [col for col in prediction_columns if col in prediction_dataset.columns]
+        prediction_columns = [
+            "id",
+            "turn",
+            "input_ids",
+            "rationale_start",
+            "rationale_end",
+            "rationale_labels",
+            "passage_mask",
+            "yng_label",
+            "pred_answer",
+            "pred_yng_label",
+            "pred_rationale_labels",
+        ]
+        prediction_columns = [
+            col for col in prediction_columns if col in prediction_dataset.columns
+        ]
         prediction_data = prediction_dataset[prediction_columns].copy()
-        prediction_data["input"] = tokenizer.batch_decode(prediction_dataset["input_ids"], skip_special_tokens=False)
+        prediction_data["input"] = tokenizer.batch_decode(
+            prediction_dataset["input_ids"], skip_special_tokens=False
+        )
         prediction_data.drop("input_ids", axis=1, inplace=True)
         prediction_data = prediction_data.set_index(["id", "turn"])
         predictions = text_dataset.join(prediction_data, on=["id", "turn"])
         return predictions
-    
+
     predictions = {}
     for split, pred_dataset in prediction_dataset.items():
         pred = merge(text_dataset[split][:], pred_dataset[:])

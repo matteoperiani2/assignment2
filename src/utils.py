@@ -306,14 +306,33 @@ def print_conversation(passage, questions, answers, pred_answers, answers_f1, co
     out += "_"*180+"\n"
     print(out)
 
-def print_question(passage, question, answer, pred_answer, answer_f1):
+def print_questions(df, max_passage_length = 150, print_history=False):
+    for _, data in df.iterrows():
+            history = data.get("history", None) if print_history else None
+            print_question(
+                data["passage"][:max_passage_length],
+                data["question"],
+                data["answer"],
+                data.get("pred_answer", None),
+                data.get("answer_f1", None),
+                history=history
+            )
+def print_question(passage, question, answer, pred_answer=None, answer_f1=None, history=None):
     out = color.BOLD + "Passage: " + color.END + passage + "[...]\n\n"
     out += ""
+
+    if history is not None:
+        out += "History:\n"
+        for qa in history:
+            out += f'{qa["turn"]}) q: {qa["question"]} a: {qa["answer"]}\n'
+        out+= "\n"
     
     out += color.BOLD + "Question: " + color.END + question + "\n"
-    out += color.BOLD + "Predicted Answer: " + color.END + pred_answer + "\n"
+    if pred_answer is not None:
+        out += color.BOLD + "Predicted Answer: " + color.END + pred_answer + "\n"
     out += color.BOLD + "Answer: " + color.END + answer + "\n"
-    out += color.BOLD + "Answer SQUAD-f1: " + color.END + str(answer_f1) + "\n"
+    if answer_f1 is not None:
+        out += color.BOLD + "Answer SQUAD-f1: " + color.END + str(answer_f1) + "\n"
     out += "\n"
 
     out += "_"*180+"\n"
