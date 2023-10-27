@@ -14,6 +14,9 @@ from src.squad_f1 import compute_f1
 from src.utils import (
     get_column_names,
     load_pickle,
+    print_conversation,
+    print_question,
+    print_header,
     save_pickle,
     to_padded_tensor,
 )
@@ -121,29 +124,6 @@ def compute_avg_f1(predictions: datasets.Dataset, filter_fn=None):
     ratio = len(examples) / len(predictions)
     return avg_f1, ratio
 
-def evaluate_conversations(predictions: pd.DataFrame):
-    conv_results = []
-    for _,conv in predictions.groupby(by=["id"]):
-        conv_results.append({
-            "passage": conv["passage"].iloc[0], "source": conv["source"].iloc[0], "questions": conv["question"].tolist(), 
-            "answerws": conv["answer"].tolist(), "predicted_answers": conv["pred_answer"].tolist(),
-            "anwers_f1": conv["answer_f1"].tolist(), "conversation_f1": np.mean(conv["answer_f1"])
-        })
-    
-    return conv_results
-
-
-def print_worst_answers(conv_res):
-    answers = [
-        (ans, ans_f1)
-        for idx, answers in enumerate(conv_res["predicted_answers"])
-        for ans, ans_f1 in zip(answers, conv_res["answers_f1_scores"][idx])
-        if ans_f1 <= conv_res["conversation_f1_score"].min()
-    ]
-    ans_idx = [idx for idx, obj in enumerate(answers) if obj[1] == min(answers)[1]]
-
-    return np.random.choice(ans_idx, size=5)  # return random 5 worst answers
-
 
 def compute_squad_f1(example: dict):
     return {"answer_f1": compute_f1(example["answer"], example["pred_answer"])}
@@ -181,3 +161,56 @@ def get_model_results(model_name: str, history: bool):
             seed = re.search(r"(\d+)", name).group(1)
             model_results[seed] = v
     return model_results
+
+
+def evaluate_dialogues(predictions: pd.DataFrame):
+    conv_results = []
+    for _, conv in predictions.groupby(by=["id"]):
+        conv = conv.sort_values(by="turn", ascending=True)
+        conv_results.append(
+            {
+                "passage": conv["passage"].iloc[0],
+                "source": conv["source"].iloc[0],
+                "questions": conv["question"].tolist(),
+                "answers": conv["answer"].tolist(),
+                "predicted_answers": conv["pred_answer"].tolist(),
+                "answers_f1": conv["answer_f1"].tolist(),
+                "conversation_f1": np.mean(conv["answer_f1"]),
+            }
+        )
+
+    return conv_results
+
+
+def print_5_worst_conversation(conv_res, dialogue_length=3):
+    res_df = pd.DataFrame(conv_res)
+
+    for source_name, source_res in res_df.groupby(by=["source"]):
+        print_header(source_name[0])
+        worst_5 = source_res.sort_values(by=["conversation_f1"], ascending=True).iloc[
+            :5
+        ]
+        for _, w in worst_5.iterrows():
+            print_conversation(
+                w["passage"][:150],
+                w["questions"],
+                w["answers"],
+                w["predicted_answers"],
+                w["answers_f1"],
+                w["conversation_f1"],
+                limit=dialogue_length,
+            )
+
+def print_n_worst_questions_by_answer_type(predictions: pd.DataFrame, n=5):
+    for answer_type, pred in predictions.groupby(by="answer_type"):
+        print_header(answer_type)
+        worst_n = pred.sort_values(by=["answer_f1"], ascending=True).iloc[:n]
+
+        for _, w in worst_n.iterrows():
+            print_question(
+                w["passage"][:CONFIG.encoder_max_length],
+                w["question"],
+                w["answer"],
+                w["pred_answer"],
+                w["answer_f1"],
+            )

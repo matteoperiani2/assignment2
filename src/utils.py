@@ -289,26 +289,43 @@ def show_input(tokenizer, data, inputs, idx):
     print("History:", data["history"][sample_idx])
 
 
-def print_conversation(passage, questions, answers, pred_answers, answers_f1, conv_f1):
-    out = color.BOLD + "Passage: " + color.END + passage + "\n"
+def print_conversation(passage, questions, answers, pred_answers, answers_f1, conv_f1, limit=None):
+    out = color.BOLD + "Passage: " + color.END + passage + "[...]\n\n"
     out += ""
-    for q, a, p_a, a_f1 in zip(questions, answers, pred_answers, answers_f1):
+    for count, (q, a, p_a, a_f1) in enumerate(zip(questions, answers, pred_answers, answers_f1)):
         out += color.BOLD + "Question: " + color.END + q + "\n"
         out += color.BOLD + "Predicted Answer: " + color.END + p_a + "\n"
         out += color.BOLD + "Answer: " + color.END + a + "\n"
         out += color.BOLD + "Answer SQUAD-f1: " + color.END + str(a_f1) + "\n"
         out += "\n"
+        if limit != None and count+1==limit:
+            out += "[...]\n\n"
+            break
 
     out += color.BOLD + "Conversation SQUAD-f1: " + color.END + str(conv_f1) + "\n"
+    out += "_"*180+"\n"
+    print(out)
+
+def print_question(passage, question, answer, pred_answer, answer_f1):
+    out = color.BOLD + "Passage: " + color.END + passage + "[...]\n\n"
+    out += ""
+    
+    out += color.BOLD + "Question: " + color.END + question + "\n"
+    out += color.BOLD + "Predicted Answer: " + color.END + pred_answer + "\n"
+    out += color.BOLD + "Answer: " + color.END + answer + "\n"
+    out += color.BOLD + "Answer SQUAD-f1: " + color.END + str(answer_f1) + "\n"
+    out += "\n"
+
+    out += "_"*180+"\n"
     print(out)
 
 
-def print_source_name(source_name, num_asterix=100):
-    num_char = len(source_name)
+def print_header(title, num_asterix=100):
+    num_char = len(title)
     print("\n")
     print(f"#" * num_asterix)
     print("#" * (((num_asterix - 2) - num_char) // 2), end=" ")
-    print(source_name.upper(), end=" ")
+    print(title.upper(), end=" ")
     print("#" * ((num_asterix - 2) - ((num_asterix - 2) - num_char) // 2 - num_char))
     print(f"#" * num_asterix, end="\n\n")
 
